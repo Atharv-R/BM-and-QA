@@ -1,0 +1,185 @@
+
+
+"""
+Fitting a Restricted Boltzmann Machine (RBM) to MNIST 12x12 data.
+Hyperparameters set to prioritize running quickly over achieving the best results.  
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+from sklearn import linear_model, datasets, metrics
+from sklearn.model_selection import train_test_split
+from sklearn.neural_network import BernoulliRBM
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import minmax_scale
+from sklearn.base import clone
+from sklearn.datasets import fetch_openml
+import time
+np.set_printoptions(precision=4, suppress = True)
+
+
+
+# #############################################################################
+# Setting up
+pix = 144
+pixroot = round(np.sqrt(pix))
+
+
+#%% Load Data
+mnist12_train_feats = np.load('mnist12x12_trainfeats.npy')
+mnist12_train_labels = np.load('mnist12x12_trainlabels.npy') #I don't need the labels here 
+
+
+# #############################################################################
+#%% parameters and initialization
+
+#can go up to around 160 hidden units with pegasus for 144 visibles
+
+n_components = 64
+learning_rate = 0.01
+batch_size = 10
+n_iter = 30
+
+
+rbm = BernoulliRBM(n_components=n_components, learning_rate=learning_rate,
+                   batch_size=batch_size, n_iter=n_iter,
+                   random_state=1, verbose=1)
+X = mnist12_train_feats
+X = minmax_scale(X, feature_range=(0, 1))  # 0-1 scaling
+# Convert to binary by rounding
+roundup_plus = 0.15 #may want to round up not just at 0.5, but maybe slightly lower or higher 
+X = np.round(X+roundup_plus)
+
+
+#%% training
+start = time.time()
+rbm.fit(X)
+end = time.time()
+print(f"RBM training took {end - start:.2f} seconds.")
+
+np.save('mnist_trained_rbm/mnist12_rbm_components_.npy', rbm.components_)
+np.save('mnist_trained_rbm/mnist12_rbm_intercept_hidden_.npy', rbm.intercept_hidden_)
+np.save('mnist_trained_rbm/mnist12_rbm_intercept_visible_.npy', rbm.intercept_visible_)
+
+#%% Sampling, Plotting
+
+#Do some (Gibbs) sampling on the fitted model 
+num_samples = 10 #how many samples?
+gibbs_steps = 1000 #how many Gibbs steps for each sample?
+def bm_energy(v, rbm):
+    """Compute energy of visible vector v under the RBM."""
+    # E(v) = -b_v.T v - sum(log(1 + exp(b_h + W v)))
+    b_v = rbm.intercept_visible_
+    b_h = rbm.intercept_hidden_
+    W = rbm.components_
+    v = v.reshape(-1)
+    term1 = -np.dot(b_v, v)
+    term2 = -np.sum(np.log1p(np.exp(b_h + np.dot(W, v))))
+    return term1 + term2
+
+def tabu_search(v_init, rbm, steps=100, tabu_size=20):
+    """Tabu search to maximize likelihood (minimize energy) of v under RBM."""
+    v = v_init.copy()
+    best_v = v.copy()
+    best_energy = bm_energy(v, rbm)
+    tabu_list = []
+    for _ in range(steps):
+        # Generate neighbors by flipping each bit
+        neighbors = []
+        for idx in range(len(v)):
+            v_new = v.copy()
+            v_new[idx] = 1 - v_new[idx]
+            neighbors.append((v_new, idx))
+        # Evaluate energies, skip tabu
+        energies = []
+        for v_new, idx in neighbors:
+            if tuple(v_new) in tabu_list:
+                energies.append(np.inf)
+            else:
+                energies.append(bm_energy(v_new, rbm))
+        # Select best neighbor
+        min_idx = np.argmin(energies)
+        if energies[min_idx] < best_energy:
+            v = neighbors[min_idx][0]
+            best_v = v.copy()
+            best_energy = energies[min_idx]
+        # Update tabu list
+        tabu_list.append(tuple(v))
+        if len(tabu_list) > tabu_size:
+            tabu_list.pop(0)
+    return best_v
+
+k = 4  # Set grid size (k x k)
+num_samples = k ** 2
+np.random.seed(42)  # For reproducibility
+samples = []
+
+for j in range(num_samples):
+    v = np.random.randint(0, 2, pix)
+    for i in range(gibbs_steps):
+        v = rbm.gibbs(v)
+    # Run tabu search to improve likelihood / "clean up" resulting sample?
+    v = tabu_search(v, rbm, steps=5, tabu_size=100)
+    samples.append(v.reshape((pixroot, pixroot)))
+
+plt.figure(figsize=(2 * k, 2 * k))
+for idx, img in enumerate(samples):
+    plt.subplot(k, k, idx + 1)
+    plt.imshow(img, cmap=plt.cm.gray_r, interpolation='nearest')
+    plt.title('')
+    plt.axis('off')
+plt.suptitle(f'{num_samples} RBM Samples ({k}x{k} grid)')
+plt.show()
+print('We used', n_components, 'hidden nodes.')
+
+#%% Visualize some images from the original dataset in a k x k grid
+k = 4
+num_images_to_show = k * k
+plt.figure(figsize=(2 * k, 2 * k))
+for i in range(num_images_to_show):
+    plt.subplot(k, k, i + 1)
+    plt.imshow(X[i].reshape((pixroot, pixroot)), cmap=plt.cm.gray_r, interpolation='nearest')
+    plt.title(f"Sample {i+1}")
+    plt.axis('off')
+plt.suptitle(f'Original MNIST 12x12 Samples ({k}x{k} grid)')
+plt.show()
+
+'''
+#visualize the components of the data that the BM learned
+plt.figure(figsize=(4.2, 4))
+for i, comp in enumerate(rbm.components_):
+    plt.subplot(np.ceil(int(rbm.n_components/10)), 10, i +1)
+    plt.imshow(comp.reshape((pixroot,pixroot)), cmap=plt.cm.gray_r,
+               interpolation='nearest')
+    plt.xticks(())
+    plt.yticks(())
+plt.suptitle('Components extracted by RBM', fontsize=16)
+plt.subplots_adjust(0.08, 0.02, 0.92, 0.85, 0.08, 0.23)
+
+plt.savefig('components.pdf')
+'''
+    
+'''
+num_samples = 1
+gibbs_steps = 600
+for j in range(num_samples):
+    v = np.random.randint(0, 2, 28*28)
+    for i in range (gibbs_steps):
+        v = rbm.gibbs(v)
+        if i%100 == 0: 
+            plt.figure()
+            plt.imshow(v.reshape((28,28)), cmap=plt.cm.gray_r,
+                       interpolation='nearest')
+#'''
+
+'''
+pointnum = 6 #which number data point of handwritten image to plot
+plt.figure()
+plt.imshow(X[pointnum,:].reshape((28,28)), cmap=plt.cm.gray_r,
+               interpolation='nearest')
+print('The plot should be a ', Y[pointnum])
+#'''
+
+
+# %%
