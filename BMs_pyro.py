@@ -526,9 +526,9 @@ def main():
     num_nodes = num_visible + num_hidden
     er_p = 0.4  # Further reduced connection probability for stability
 
-    step_size = 0.005  # You can change this value for experiments 
+    step_size = 0.01  # You can change this value for experiments 
     l2_amount = 0.1  # L2 regularization amount
-    num_epochs = 30
+    num_epochs = 50
     batch_size = 30  
     data_loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
