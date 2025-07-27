@@ -338,7 +338,7 @@ def graph_to_bm(graph: nx.Graph, node_labels: dict[int, str]) -> CustomBoltzmann
 
 # --------------------------------------------------------------------------
 # Training: using CD here, though this is relatively flexibly written. 
-def train_boltzmann_machine(model: CustomBoltzmannMachine, data_loader: torch.utils.data.DataLoader,
+def train_boltzmann_machine_cd(model: CustomBoltzmannMachine, data_loader: torch.utils.data.DataLoader,
                             optimizer: torch.optim.Optimizer, num_epochs: int, k_steps: int,
                             batch_size: int = 64, step_size: float = 0.001):
     """
@@ -346,6 +346,7 @@ def train_boltzmann_machine(model: CustomBoltzmannMachine, data_loader: torch.ut
     batch_size: Number of samples per batch.
     step_size: Learning rate for optimizer.
     """
+    loss_history = []
     model.train()
     print(f"Starting training on {device} for {num_epochs} epochs... 🏋️")
     # Update optimizer learning rate if step_size is provided
@@ -368,8 +369,78 @@ def train_boltzmann_machine(model: CustomBoltzmannMachine, data_loader: torch.ut
             total_loss += loss.item()
 
         avg_loss = total_loss / len(data_loader)
+        loss_history.append(avg_loss)
         print(f"Epoch {epoch+1}/{num_epochs} | Avg CD Loss: {avg_loss:.4f}")
     print("Training complete! ✅")
+    return loss_history
+
+# Training with Persistent Contrastive Divergence (PCD)
+def train_boltzmann_machine_pcd(model: CustomBoltzmannMachine, data_loader: torch.utils.data.DataLoader,
+                                optimizer: torch.optim.Optimizer, num_epochs: int, k_steps: int = 1,
+                                batch_size: int = 64, step_size: float = 0.001):
+    """
+    Trains the Boltzmann Machine using Persistent Contrastive Divergence (PCD).
+    Maintains persistent chains across batches and epochs.
+    """
+    loss_history = []
+    model.train()
+    print(f"Starting PCD training on {device} for {num_epochs} epochs... 🏋️")
+
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = step_size
+
+    if hasattr(data_loader, 'batch_size') and data_loader.batch_size != batch_size:
+        dataset = data_loader.dataset
+        data_loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    # Persistent chains (initialized during first batch)
+    persistent_v = None
+    persistent_h = None
+
+    for epoch in range(num_epochs):
+        total_loss = 0.0
+        for batch_data in data_loader:
+            batch = batch_data[0].to(device)
+            current_batch_size = batch.shape[0]
+
+            # Initialize or resize persistent chains
+            if (persistent_v is None) or (persistent_v.shape[0] != current_batch_size):
+                persistent_v = torch.bernoulli(torch.full((current_batch_size, model.num_visible), 0.5, device=device))
+                persistent_h = torch.bernoulli(torch.full((current_batch_size, model.num_hidden), 0.5, device=device))
+
+            optimizer.zero_grad()
+
+            # --- Positive Phase (mean-field approx) ---
+            v_pos = batch
+            h_pos = torch.full((current_batch_size, model.num_hidden), 0.5, device=device)
+            for _ in range(model.k_gibbs_positive):
+                v_pos, h_pos = model.mean_field_update(v_pos, h_pos, update_v=False, update_h=True)
+
+            # --- Negative Phase (persistent chain) ---
+            v_neg = persistent_v.clone()
+            h_neg = persistent_h.clone()
+            for _ in range(k_steps):
+                v_neg, h_neg = model.gibbs_sample_step_no_grad(v_neg, h_neg, update_v=True, update_h=True)
+
+            # Update persistent chain
+            persistent_v = v_neg.detach()
+            persistent_h = h_neg.detach()
+
+            # --- Loss ---
+            pos_energy = model.energy(v_pos, h_pos).mean()
+            neg_energy = model.energy(v_neg, h_neg).mean()
+            pcd_loss = pos_energy - neg_energy
+
+            pcd_loss.backward()
+            optimizer.step()
+            total_loss += pcd_loss.item()
+
+        avg_loss = total_loss / len(data_loader)
+        loss_history.append(avg_loss)
+        print(f"Epoch {epoch+1}/{num_epochs} | Avg PCD Loss: {avg_loss:.4f}")
+    print("PCD training complete! ✅")
+    return loss_history
+
 
 
 #SAMPLING -- this can maybe be improved? ned to test the vectorized version more and think. 
@@ -558,11 +629,23 @@ def main():
     print(f"V-V edges: {vv_edges}, H-H edges: {hh_edges}, V-H edges: {vh_edges}")
 
     # Use the factory function
-    model = graph_to_bm(G, node_labels)
+    model_cd = graph_to_bm(G, node_labels)
+    model_pcd = graph_to_bm(G, node_labels)
 
     # --- Training ---
-    optimizer = torch.optim.RMSprop(model.parameters(), lr=step_size, weight_decay=l2_amount)
-    train_boltzmann_machine(model, data_loader, optimizer, num_epochs=num_epochs, k_steps=1, batch_size=batch_size, step_size=step_size)
+    optimizer_cd = torch.optim.RMSprop(model_cd.parameters(), lr=step_size, weight_decay=l2_amount)
+    optimizer_pcd = torch.optim.RMSprop(model_pcd.parameters(), lr=step_size, weight_decay=l2_amount)
+    cd_losses = train_boltzmann_machine_cd(model_cd, data_loader, optimizer_cd, num_epochs=num_epochs, k_steps=1, batch_size=batch_size, step_size=step_size)
+    pcd_losses = train_boltzmann_machine_pcd(model_pcd, data_loader, optimizer_pcd, num_epochs=num_epochs, k_steps=1, batch_size=batch_size, step_size=step_size)
+    # --- Plot training loss ---
+    plt.plot(cd_losses, label='CD')
+    plt.plot(pcd_losses, label='PCD')
+    plt.xlabel('Epoch')
+    plt.ylabel('Avg Energy Loss')
+    plt.title('Training Loss Comparison: CD vs PCD')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
 
     #--- Sampling & Visualization ---
     num_gen_samples = 16
@@ -571,7 +654,9 @@ def main():
 
     #need to find a way to speed up these sampling functions, so slow
     print("\n--- Generating samples using Gibbs Sampling ---")
-    gibbs_samples = sample_from_bm(model, num_gen_samples, burn_in, method='gibbs')
+    #gibbs_samples = sample_from_bm(model, num_gen_samples, burn_in, method='gibbs')
+    samples_cd = sample_from_bm(model_cd, num_samples=64, burn_in_steps=100)
+    samples_pcd = sample_from_bm(model_pcd, num_samples=64, burn_in_steps=100)
 
     #print("\n--- Generating samples using Simulated Annealing ---")
     #sa_samples = sample_from_bm(model, num_gen_samples, burn_in, method='simulated_annealing')
@@ -587,21 +672,22 @@ def main():
         plt.show()
 
     print("\nDisplaying generated images... 🖼️")
-    plot_samples(gibbs_samples, "Samples from Gibbs Sampling")
+    plot_samples(samples_cd, "Samples from Gibbs Sampling (CD)")
+    plot_samples(samples_pcd, "Samples from Gibbs Sampling (PCD)")
     #plot_samples(sa_samples, "Samples from Simulated Annealing")
 
 
-    print("\n--- Improving samples with Tabu Search ---")
-    tabu_steps = 5
-    tabu_improved_samples = []
-    for i in range(gibbs_samples.shape[0]):
-        v_init = gibbs_samples[i].unsqueeze(0)
-        improved_v = tabu_search_bm(model, v_init, steps=tabu_steps)
-        tabu_improved_samples.append(improved_v)
-    tabu_improved_samples = torch.stack(tabu_improved_samples, dim=0)
+    # print("\n--- Improving samples with Tabu Search ---")
+    # tabu_steps = 5
+    # tabu_improved_samples = []
+    # for i in range(gibbs_samples.shape[0]):
+    #     v_init = gibbs_samples[i].unsqueeze(0)
+    #     improved_v = tabu_search_bm(model, v_init, steps=tabu_steps)
+    #     tabu_improved_samples.append(improved_v)
+    # tabu_improved_samples = torch.stack(tabu_improved_samples, dim=0)
 
-    print("\nDisplaying Tabu Search improved images... 🖼️")
-    plot_samples(tabu_improved_samples, f"Tabu Search Improved Samples ({tabu_steps} steps)")
+    # print("\nDisplaying Tabu Search improved images... 🖼️")
+    # plot_samples(tabu_improved_samples, f"Tabu Search Improved Samples ({tabu_steps} steps)")
 
 
 if __name__ == '__main__':
