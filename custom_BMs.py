@@ -316,6 +316,73 @@ class CustomBoltzmannMachine(nn.Module):
         return cd_loss, v_neg
 
 # --------------------------------------------------------------------------
+def build_custom_bm_graph(num_visible: int,
+                          num_hidden: int,
+                          visible_visible_edges: list[tuple[int, int]],
+                          hidden_hidden_edges: list[tuple[int, int]],
+                          visible_hidden_edges: list[tuple[int, int]]) -> tuple[nx.Graph, dict[int, str]]:
+    """
+    Constructs a NetworkX graph for your Boltzmann Machine given explicit edge lists.
+
+    Nodes are assumed to be indexed as:
+        0 .. num_visible-1           : visible units
+        num_visible .. num_visible+num_hidden-1 : hidden units
+
+    Edge lists should use those indices. Example:
+        visible_hidden_edges = [(0, 144), (3, 150), ...]
+    """
+    num_nodes = num_visible + num_hidden
+    G = nx.Graph()
+    G.add_nodes_from(range(num_nodes))
+
+    # Add edges; assume inputs are valid (could add sanity checks)
+    G.add_edges_from(visible_visible_edges)
+    G.add_edges_from(hidden_hidden_edges)
+    G.add_edges_from(visible_hidden_edges)
+
+    # Labeling
+    node_labels = {i: 'visible' if i < num_visible else 'hidden' for i in range(num_nodes)}
+    return G, node_labels
+
+# visualizing the graph of the BM
+def visualize_bm_graph(G: nx.Graph, node_labels: dict[int, str],
+                       figsize=(8, 6), title="Boltzmann Machine Graph",
+                       show_edge_weights: bool = False):
+    """
+    Draws the BM graph with visible/hidden nodes colored differently.
+    """
+    plt.figure(figsize=figsize)
+    # layout can be changed: spring_layout, shell_layout, spectral_layout, etc.
+    pos = nx.spring_layout(G, seed=42)  # deterministic for consistency
+
+    # Partition nodes
+    visible_nodes = [n for n, t in node_labels.items() if t == 'visible']
+    hidden_nodes = [n for n, t in node_labels.items() if t == 'hidden']
+
+    # Draw nodes
+    nx.draw_networkx_nodes(G, pos, nodelist=visible_nodes, node_color='skyblue', label='Visible', node_size=100)
+    nx.draw_networkx_nodes(G, pos, nodelist=hidden_nodes, node_color='salmon', label='Hidden', node_size=100)
+
+    # Draw edges
+    nx.draw_networkx_edges(G, pos, alpha=0.5)
+
+    # Optionally annotate edge weights if present
+    if show_edge_weights:
+        edge_labels = {}
+        for u, v, data in G.edges(data=True):
+            w = data.get('weight', '')
+            edge_labels[(u, v)] = f"{w:.2f}" if isinstance(w, float) else str(w)
+        nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_size=6)
+
+    # Labels (optional - can clutter if many nodes)
+    # nx.draw_networkx_labels(G, pos, font_size=6)
+
+    plt.title(title)
+    plt.legend(scatterpoints=1)
+    plt.axis('off')
+    plt.tight_layout()
+    plt.show()
+
 #function to take a graph as input and turn it into a BM with 
 # corresponding architecture. 
 def graph_to_bm(graph: nx.Graph, node_labels: dict[int, str]) -> CustomBoltzmannMachine:
@@ -335,6 +402,43 @@ def graph_to_bm(graph: nx.Graph, node_labels: dict[int, str]) -> CustomBoltzmann
     model = CustomBoltzmannMachine(bm_architecture).to(device)
     return model
 
+# Coverts the graph to a Boltzmann Machine and visualizes it.
+def visualize_bm_bipartite_layout(G, node_labels, figsize=(10, 6), title="BM Graph - Bipartite Style"):
+    import matplotlib.pyplot as plt
+    import networkx as nx
+
+    # Split nodes
+    visible_nodes = [n for n, t in node_labels.items() if t == 'visible']
+    hidden_nodes = [n for n, t in node_labels.items() if t == 'hidden']
+
+    # Manually define bipartite-style positions
+    pos = {}
+
+    # Stack visible nodes vertically on the left
+    for i, node in enumerate(sorted(visible_nodes)):
+        pos[node] = (0, i)
+
+    # Stack hidden nodes vertically on the right
+    for i, node in enumerate(sorted(hidden_nodes)):
+        pos[node] = (1, i)
+
+    plt.figure(figsize=figsize)
+
+    # Draw nodes
+    nx.draw_networkx_nodes(G, pos, nodelist=visible_nodes, node_color='skyblue', label='Visible', node_size=100)
+    nx.draw_networkx_nodes(G, pos, nodelist=hidden_nodes, node_color='salmon', label='Hidden', node_size=100)
+
+    # Draw edges
+    nx.draw_networkx_edges(G, pos, alpha=0.5)
+
+    # Optionally add labels (can comment out if cluttered)
+    # nx.draw_networkx_labels(G, pos, font_size=6)
+
+    plt.title(title)
+    plt.axis('off')
+    plt.tight_layout()
+    plt.legend()
+    plt.show()
 
 # --------------------------------------------------------------------------
 # Training: using CD here, though this is relatively flexibly written. 
@@ -598,11 +702,24 @@ def main():
     plt.tight_layout()
     plt.show()
     
+
+    # Custom Graph setup
+    num_visible = 144
+    num_hidden = 50
+
+    # Suppose we have these edge definitions:
+    vv = [(0, 1), (2, 3)]  # visible-visible
+    hh = [(144, 145), (146, 147)]  # hidden-hidden (indices start at num_visible)
+    vh = [(0, 144), (5, 149), (10, 160)]  # visible-hidden (make sure hidden indices are offset)
+
+    G, node_labels = build_custom_bm_graph(num_visible, num_hidden, vv, hh, vh)
+
+    
     # --- Graph and Model Setup ---
-    num_visible = 144  # 12x12 pixels
-    num_hidden = 50    # Reduced for faster training
-    num_nodes = num_visible + num_hidden
-    er_p = 0.4  # Further reduced connection probability for stability
+    # num_visible = 144  # 12x12 pixels
+    # num_hidden = 50    # Reduced for faster training
+    # num_nodes = num_visible + num_hidden
+    # er_p = 0.4  # Further reduced connection probability for stability
 
     step_size = 0.01  # You can change this value for experiments 
     l2_amount = 0.1  # L2 regularization amount
@@ -610,16 +727,16 @@ def main():
     batch_size = 30  
     data_loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-    make_bipartite = False  # toggle to True for RBM
+    # make_bipartite = False  # toggle to True for RBM
 
-    print(f"Generating Erdos-Renyi graph (n={num_nodes}, p={er_p})...")
-    G = nx.erdos_renyi_graph(num_nodes, er_p, seed=42)
-    node_labels = {i: 'visible' if i < num_visible else 'hidden' for i in range(num_nodes)}
+    # print(f"Generating Erdos-Renyi graph (n={num_nodes}, p={er_p})...")
+    # G = nx.erdos_renyi_graph(num_nodes, er_p, seed=42)
+    # node_labels = {i: 'visible' if i < num_visible else 'hidden' for i in range(num_nodes)}
     
-    if make_bipartite:
-        # Remove all edges that are not between visible and hidden nodes
-        edges_to_remove = [(u, v) for u, v in G.edges() if (node_labels[u] == node_labels[v])]
-        G.remove_edges_from(edges_to_remove)
+    # if make_bipartite:
+    #     # Remove all edges that are not between visible and hidden nodes
+    #     edges_to_remove = [(u, v) for u, v in G.edges() if (node_labels[u] == node_labels[v])]
+    #     G.remove_edges_from(edges_to_remove)
 
     # Print some graph statistics
     print(f"Graph has {G.number_of_nodes()} nodes and {G.number_of_edges()} edges")
@@ -628,17 +745,22 @@ def main():
     vh_edges = sum(1 for u, v in G.edges() if (u < num_visible) != (v < num_visible))
     print(f"V-V edges: {vv_edges}, H-H edges: {hh_edges}, V-H edges: {vh_edges}")
 
+    visualize_bm_graph(G, node_labels, title="Custom BM Architecture")
+    visualize_bm_bipartite_layout(G, node_labels, title="My Custom BM Layout (Bipartite Style)")
+
+
     # Use the factory function
-    model_cd = graph_to_bm(G, node_labels)
+    # model_cd = graph_to_bm(G, node_labels)
     model_pcd = graph_to_bm(G, node_labels)
 
     # --- Training ---
-    optimizer_cd = torch.optim.RMSprop(model_cd.parameters(), lr=step_size, weight_decay=l2_amount)
+    # optimizer_cd = torch.optim.RMSprop(model_cd.parameters(), lr=step_size, weight_decay=l2_amount)
     optimizer_pcd = torch.optim.RMSprop(model_pcd.parameters(), lr=step_size, weight_decay=l2_amount)
-    cd_losses = train_boltzmann_machine_cd(model_cd, data_loader, optimizer_cd, num_epochs=num_epochs, k_steps=1, batch_size=batch_size, step_size=step_size)
+    # cd_losses = train_boltzmann_machine_cd(model_cd, data_loader, optimizer_cd, num_epochs=num_epochs, k_steps=1, batch_size=batch_size, step_size=step_size)
     pcd_losses = train_boltzmann_machine_pcd(model_pcd, data_loader, optimizer_pcd, num_epochs=num_epochs, k_steps=1, batch_size=batch_size, step_size=step_size)
+    
     # --- Plot training loss ---
-    plt.plot(cd_losses, label='CD')
+    # plt.plot(cd_losses, label='CD')
     plt.plot(pcd_losses, label='PCD')
     plt.xlabel('Epoch')
     plt.ylabel('Avg Energy Loss')
@@ -655,8 +777,8 @@ def main():
     #need to find a way to speed up these sampling functions, so slow
     print("\n--- Generating samples using Gibbs Sampling ---")
     #gibbs_samples = sample_from_bm(model, num_gen_samples, burn_in, method='gibbs')
-    samples_cd = sample_from_bm(model_cd, num_samples=64, burn_in_steps=100)
-    samples_pcd = sample_from_bm(model_pcd, num_samples=64, burn_in_steps=100)
+    # samples_cd = sample_from_bm(model_cd, num_samples=64, burn_in_steps=100)
+    samples_pcd = sample_from_bm(model_pcd, num_gen_samples, burn_in, method='gibbs')
 
     #print("\n--- Generating samples using Simulated Annealing ---")
     #sa_samples = sample_from_bm(model, num_gen_samples, burn_in, method='simulated_annealing')
@@ -672,22 +794,22 @@ def main():
         plt.show()
 
     print("\nDisplaying generated images... 🖼️")
-    plot_samples(samples_cd, "Samples from Gibbs Sampling (CD)")
+    # plot_samples(samples_cd, "Samples from Gibbs Sampling (CD)")
     plot_samples(samples_pcd, "Samples from Gibbs Sampling (PCD)")
     #plot_samples(sa_samples, "Samples from Simulated Annealing")
 
 
-    # print("\n--- Improving samples with Tabu Search ---")
-    # tabu_steps = 5
-    # tabu_improved_samples = []
-    # for i in range(gibbs_samples.shape[0]):
-    #     v_init = gibbs_samples[i].unsqueeze(0)
-    #     improved_v = tabu_search_bm(model, v_init, steps=tabu_steps)
-    #     tabu_improved_samples.append(improved_v)
-    # tabu_improved_samples = torch.stack(tabu_improved_samples, dim=0)
+    print("\n--- Improving samples with Tabu Search ---")
+    tabu_steps = 5
+    tabu_improved_samples = []
+    for i in range(samples_pcd.shape[0]):
+        v_init = samples_pcd[i].unsqueeze(0)
+        improved_v = tabu_search_bm(model_pcd, v_init, steps=tabu_steps)
+        tabu_improved_samples.append(improved_v)
+    tabu_improved_samples = torch.stack(tabu_improved_samples, dim=0)
 
-    # print("\nDisplaying Tabu Search improved images... 🖼️")
-    # plot_samples(tabu_improved_samples, f"Tabu Search Improved Samples ({tabu_steps} steps)")
+    print("\nDisplaying Tabu Search improved images... 🖼️")
+    plot_samples(tabu_improved_samples, f"Tabu Search Improved Samples ({tabu_steps} steps)")
 
 
 if __name__ == '__main__':
