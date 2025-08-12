@@ -28,19 +28,23 @@ np.random.seed(42)
 random.seed(42)
 
 
-
 #this is a class to use for the networkx graph to boltzmann machine conversion.
 class BoltzmannMachineGraph:
     """
     Defines the Boltzmann Machine architecture based on a NetworkX graph
     and a mapping of nodes to visible/hidden units. Generates masks for weight matrices.
     """
-    def __init__(self, graph: nx.Graph, node_labels: dict[int, str]):
+    def __init__(self, graph: nx.Graph, node_labels):
         """
         Args:
             graph (nx.Graph): The undirected graph defining connections.
-            node_labels (dict): A dictionary mapping node IDs to 'visible' or 'hidden'.
+            node_labels (dict or list): A dictionary mapping node IDs to 'visible' or 'hidden'.
         """
+        if not (isinstance(node_labels, dict) or isinstance(node_labels, np.ndarray)):
+            raise TypeError("node_labels must be either a dict or a numpy array.")
+        if isinstance(node_labels, np.ndarray):
+            # Convert numpy array to dict: assume 0=visible, 1=hidden or vice versa
+            node_labels = {i: 'visible' if label == 1 else 'hidden' for i, label in enumerate(node_labels)}
         self.graph = graph
         self.node_labels = node_labels
 
