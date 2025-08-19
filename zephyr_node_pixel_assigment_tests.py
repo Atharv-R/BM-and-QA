@@ -38,11 +38,94 @@ the graph nodes with order of pixel labels.
 
 '''
 
+'''
+8/17/25
 
+Tried assigning pixels to nodes in a way that preserves locality.
+Instead of first 144 visible, I tried to group nearby pixels together using degrees of each node.
+
+Also, trained using more gibbs step in training (5 -> 10), more epochs (20 -> 50 -> 100), and different learning rates.
+The resulting generated samples were definitely an improvement
+'''
 import dwave_networkx as dnx
 import numpy as np
 import networkx as nx
 
+# Heler functions
+# Get 2D positions for Zephyr nodes (Zephyr layout)
+def get_zephyr_positions(G):
+    try:
+        import dwave_networkx as dnx
+        # If available, this reflects physical qubit layout
+        pos = dnx.zephyr_layout(G)  # dict: node -> (x, y)
+    except Exception:
+        # fallback: deterministic spring layout
+        pos = nx.spring_layout(G, seed=42, dim=2)
+    return pos
+
+#  Assigning 144 visibles by laying a 12x12 grid over the layout and
+#    greedily taking the nearest unique node to each grid cell center.
+def assign_visibles_by_grid(G, grid_shape=(12, 12), min_degree=None):
+    pos = get_zephyr_positions(G)
+    nodes = np.array(sorted(G.nodes()))
+    coords = np.array([pos[n] for n in nodes])  # shape (N, 2)
+
+    # grid centers across the layout bounding box
+    xs, ys = coords[:, 0], coords[:, 1]
+    xmin, xmax = xs.min(), xs.max()
+    ymin, ymax = ys.min(), ys.max()
+
+    nrows, ncols = grid_shape
+    grid_x = np.linspace(xmin, xmax, ncols)
+    # flip y so row 0 is top
+    grid_y = np.linspace(ymax, ymin, nrows)
+
+    selected = []
+    used = set()
+
+    # function to pick nearest unused node to target (x,y), optionally with min degree
+    def pick_nearest(target_xy):
+        # candidates not used yet
+        mask = [n for n in nodes if n not in used]
+        if not mask:
+            raise RuntimeError("Ran out of nodes to assign as visibles")
+        pts = np.array([pos[n] for n in mask])
+        d2 = np.sum((pts - target_xy) ** 2, axis=1)
+        order = np.argsort(d2)
+        if min_degree is None:
+            return mask[order[0]]
+        # prefer nodes with degree >= min_degree, otherwise next nearest
+        for idx in order:
+            if G.degree[mask[idx]] >= min_degree:
+                return mask[idx]
+        return mask[order[0]]  # fallback
+
+    # row-major over the image grid -> preserves pixel locality
+    for r in range(nrows):
+        for c in range(ncols):
+            chosen = pick_nearest(np.array([grid_x[c], grid_y[r]]))
+            selected.append(chosen)
+            used.add(chosen)
+
+    return selected  # list of node ids in pixel (row-major) order
+
+#   Relabel graph so selected visibles become 0..(v-1) in pixel order.
+#    All remaining nodes (hidden) become v..(v+h-1).
+def relabel_visible_first(G, visible_nodes_in_pixel_order):
+    visible_set = set(visible_nodes_in_pixel_order)
+    hidden_nodes = [n for n in sorted(G.nodes()) if n not in visible_set]
+
+    mapping = {}
+    # visibles first in the order that matches pixel order
+    for new_i, old in enumerate(visible_nodes_in_pixel_order):
+        mapping[old] = new_i
+    # hiddens after
+    offset = len(visible_nodes_in_pixel_order)
+    for j, old in enumerate(hidden_nodes):
+        mapping[old] = offset + j
+
+    G2 = nx.relabel_nodes(G, mapping, copy=True)
+    return G2, mapping
 
 def draw_zephyr_hidden_visible(G, vh_nodearray):
     '''
@@ -86,8 +169,6 @@ dnx.draw_zephyr(G, linear_biases=lin_biases)
 n = G.number_of_nodes()
 vh_nodearray = np.zeros(n) 
 
-# visiblesmask = ((np.floor(np.arange(n))/4) % 8 <= 3) 
-# vh_nodearray[visiblesmask] = 1
 
 vh_nodearray[:int(np.floor(n/2))] = 1
 node_labels = {i: 'visible' if label == 1 else 'hidden' for i, label in enumerate(vh_nodearray)}
@@ -110,14 +191,6 @@ vis_to_remove = num_visible - final_num_vis
 # %%
 nodes_sorted = np.array(sorted(G.nodes()), dtype=int)
 
-# nodes_to_remove = []
-# left = 0
-# right = len(nodes_sorted) - 1
-# for i in range(int(vis_to_remove)):
-#     nodes_to_remove.append(nodes_sorted[left])
-#     left += 1
-#     nodes_to_remove.append(nodes_sorted[right])
-#     right -= 1
 
 
 '''
@@ -138,17 +211,34 @@ G.remove_nodes_from(nodes_to_remove)
 # Relabel nodes to go from 0 to (new number of nodes - 1)
 G = nx.convert_node_labels_to_integers(G, ordering='sorted')
 
-# Update vh_nodearray and node_labels to match new node indices
-vh_nodearray = np.delete(vh_nodearray, nodes_to_remove)
-node_labels = {i: 'visible' if label == 1 else 'hidden' for i, label in enumerate(vh_nodearray)}
 
-new_n = G.number_of_nodes()
-num_visible = sum(vh_nodearray)
-num_hidden = new_n - num_visible
+# Pick 144 visible nodes that preserve locality (12x12)
+num_visible = 144
+visible_nodes_in_pixel_order = assign_visibles_by_grid(G, grid_shape=(12, 12), min_degree=3)  # min_degree optional
+assert len(visible_nodes_in_pixel_order) == num_visible
+
+# Relabel so visibles are 0..143 in pixel (row-major) order and then hiddens after that
+G, mapping_old_to_new = relabel_visible_first(G, visible_nodes_in_pixel_order)
+
+# Build vh_nodearray and node_labels consistent with your downstream code
+n = G.number_of_nodes()
+vh_nodearray = np.zeros(n, dtype=int)
+vh_nodearray[:num_visible] = 1  # visibles are indices 0..143 now
+node_labels = {i: 'visible' if i < num_visible else 'hidden' for i in range(n)}
+
+# print stats
+num_hidden = n - num_visible
 print('Updated number of visibles:', num_visible)
 print('Updated number of hiddens:', num_hidden)
 
-# %%
+print(f"Graph has {G.number_of_nodes()} nodes and {G.number_of_edges()} edges")
+vv_edges = sum(1 for u, v in G.edges() if u < num_visible and v < num_visible)
+hh_edges = sum(1 for u, v in G.edges() if u >= num_visible and v >= num_visible)
+vh_edges = sum(1 for u, v in G.edges() if (u < num_visible) != (v < num_visible))
+print(f"V-V edges: {vv_edges}, H-H edges: {hh_edges}, V-H edges: {vh_edges}")
+
+draw_zephyr_hidden_visible(G, vh_nodearray)             # DWN’s Zephyr look
+
 
 from custom_BMs import *
 
@@ -180,40 +270,29 @@ roundup_boost = 0
 X_data = (torch.from_numpy(mnist_feats).float() < 0.5 + roundup_boost).float()
 dataset = torch.utils.data.TensorDataset(X_data)
 
-# # --- Visualize a few images from X_data ---
-# plt.figure(figsize=(8, 2))
-# for i in range(8):
-#     plt.subplot(1, 8, i + 1)
-#     plt.imshow(X_data[i].cpu().numpy().reshape(12, 12), cmap='gray', vmin=0, vmax=1)
-#     plt.axis('off')
-# plt.suptitle("Example images from X_data")
-# plt.tight_layout()
-# plt.show()
+# --- Visualize a few images from X_data ---
+plt.figure(figsize=(8, 2))
+for i in range(8):
+    plt.subplot(1, 8, i + 1)
+    plt.imshow(X_data[i].cpu().numpy().reshape(12, 12), cmap='gray', vmin=0, vmax=1)
+    plt.axis('off')
+plt.suptitle("Example images from X_data")
+plt.tight_layout()
+plt.show()
 
 '''Hyperparameters here. 
 num_gibbs_steps is an important addition, which determines 
 how many gibbs steps are done for each sample in training
 Increasing it increases training time linearly, unfortunately, 
 and it is quite slow. '''
-step_size = 0.0001  # You can change this value for experiments 
+step_size = 0.005  # You can change this value for experiments 
 l2_amount = 0.0001  # L2 regularization amount
-num_epochs = 20
+num_epochs = 100
 batch_size = 50  
-num_gibbs_steps = 5 #number of gibbs loops to do in training
+num_gibbs_steps = 10 #number of gibbs loops to do in training
 data_loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
 
-
-# make_bipartite = False  # toggle to True for RBM
-
-# print(f"Generating Erdos-Renyi graph (n={num_nodes}, p={er_p})...")
-# G = nx.erdos_renyi_graph(num_nodes, er_p, seed=42)
-# node_labels = {i: 'visible' if i < num_visible else 'hidden' for i in range(num_nodes)}
-
-# if make_bipartite:
-#     # Remove all edges that are not between visible and hidden nodes
-#     edges_to_remove = [(u, v) for u, v in G.edges() if (node_labels[u] == node_labels[v])]
-#     G.remove_edges_from(edges_to_remove)
 
 # Print some graph statistics
 print(f"Graph has {G.number_of_nodes()} nodes and {G.number_of_edges()} edges")
@@ -231,13 +310,10 @@ visualize_bm_bipartite_layout(G, node_labels, title="My Custom BM Layout (Bipart
 model_pcd = graph_to_bm(G, node_labels)
 
 # --- Training ---
-# optimizer_cd = torch.optim.RMSprop(model_cd.parameters(), lr=step_size, weight_decay=l2_amount)
 optimizer_pcd = torch.optim.RMSprop(model_pcd.parameters(), lr=step_size, weight_decay=l2_amount)
-# cd_losses = train_boltzmann_machine_cd(model_cd, data_loader, optimizer_cd, num_epochs=num_epochs, k_steps=1, batch_size=batch_size, step_size=step_size)
 pcd_losses = train_boltzmann_machine_pcd(model_pcd, data_loader, optimizer_pcd, num_epochs=num_epochs, k_steps=num_gibbs_steps, batch_size=batch_size, step_size=step_size)
 
 # --- Plot training loss ---
-# plt.plot(cd_losses, label='CD')
 plt.plot(pcd_losses, label='PCD')
 plt.xlabel('Epoch')
 plt.ylabel('Avg Energy Loss')
@@ -255,12 +331,8 @@ burn_in = 100
 
 #need to find a way to speed up these sampling functions, so slow
 print("\n--- Generating samples using Gibbs Sampling ---")
-#gibbs_samples = sample_from_bm(model, num_gen_samples, burn_in, method='gibbs')
-# samples_cd = sample_from_bm(model_cd, num_samples=64, burn_in_steps=100)
 samples_pcd = sample_from_bm(model_pcd, num_gen_samples, burn_in, method='gibbs')
 
-#print("\n--- Generating samples using Simulated Annealing ---")
-#sa_samples = sample_from_bm(model, num_gen_samples, burn_in, method='simulated_annealing')
 
 def plot_samples(samples: torch.Tensor, title: str):
     fig, axes = plt.subplots(4, 4, figsize=(8, 8))
@@ -273,9 +345,7 @@ def plot_samples(samples: torch.Tensor, title: str):
     plt.show()
 
 print("\nDisplaying generated images... 🖼️")
-# plot_samples(samples_cd, "Samples from Gibbs Sampling (CD)")
 plot_samples(samples_pcd, "Samples from Gibbs Sampling (PCD)")
-#plot_samples(sa_samples, "Samples from Simulated Annealing")
 
 
 #%%
