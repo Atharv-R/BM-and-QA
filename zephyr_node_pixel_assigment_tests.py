@@ -155,7 +155,7 @@ print('K =', K, 'n =', n, 'n/K =', n/K,
 dnx.draw_zephyr(G)
 print(G.number_of_nodes())
 
-#%% 
+
 #visualize labelling
 #label all the nodes in the graph as visible 1 or hidden 0 
 n = G.number_of_nodes()
@@ -163,7 +163,7 @@ lin_biases = {i: (i-n/2) for i in range(n)}
 
 dnx.draw_zephyr(G, linear_biases=lin_biases)
 
-# %%
+
 
 #label all the nodes in the graph as visible 1 or hidden 0 
 n = G.number_of_nodes()
@@ -187,8 +187,8 @@ draw_zephyr_hidden_visible(G, vh_nodearray)
 
 final_num_vis = 144 #this is the target number of vis nodes
 vis_to_remove = num_visible - final_num_vis
-# Remove nodes alternately from the start and end of the node list
-# %%
+
+
 nodes_sorted = np.array(sorted(G.nodes()), dtype=int)
 
 
@@ -306,7 +306,6 @@ visualize_bm_bipartite_layout(G, node_labels, title="My Custom BM Layout (Bipart
 
 
 # Use the factory function
-# model_cd = graph_to_bm(G, node_labels)
 model_pcd = graph_to_bm(G, node_labels)
 
 # --- Training ---
@@ -323,7 +322,6 @@ plt.grid(True)
 plt.show()
 
 
-#%%
 #--- Sampling & Visualization ---
 num_gen_samples = 8
 burn_in = 100
@@ -361,9 +359,3 @@ tabu_improved_samples = torch.stack(tabu_improved_samples, dim=0)
 print("\nDisplaying Tabu Search improved images... 🖼️")
 plot_samples(tabu_improved_samples, f"Tabu Search Improved Samples ({tabu_steps} steps)")
 
-
-
-
-
-
-# %%
