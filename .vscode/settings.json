@@ -1,5 +1,5 @@
 {
-    "editor.experimentalGpuAcceleration": "on",
+    "editor.experimentalGpuAcceleration": "off",
     "terminal.integrated.gpuAcceleration": "on",
     "terminal.integrated.enableImages": true
 }
