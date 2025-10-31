@@ -1,4 +1,3 @@
-
 '''
 This file is a first attempt to create some custom BMs 
 based on the D-Wave Zephyr Graph architecture. 
@@ -98,6 +97,7 @@ from skimage.transform import resize
 import pandas as pd
 import os
 from torchvision import datasets, transforms
+import gcol
 
 
 # Set default device
@@ -198,6 +198,7 @@ class CustomBoltzmannMachine(nn.Module):
         self.num_visible = bm_graph.num_visible
         self.num_hidden = bm_graph.num_hidden
         self.k_gibbs_positive = k_gibbs_positive
+        
 
         self.register_buffer('mask_vv', bm_graph.mask_vv)
         self.register_buffer('mask_hh', bm_graph.mask_hh)
@@ -209,6 +210,18 @@ class CustomBoltzmannMachine(nn.Module):
 
         self.b_v = nn.Parameter(torch.zeros(self.num_visible, device=device))
         self.b_h = nn.Parameter(torch.zeros(self.num_hidden, device=device))
+
+        G = bm_graph.graph
+        coloring_dict = gcol.node_coloring(G)
+
+        # build a numpy array where index i holds coloring_dict[i] (or -1 if missing)
+        max_key = max(coloring_dict.keys())
+        arr_len = max(G.number_of_nodes(), max_key + 1)
+        color_array = np.full(arr_len, -1, dtype=int)
+        for k, v in coloring_dict.items():
+            color_array[int(k)] = int(v)
+        self.coloring = color_array
+        #now self.coloring entry i holds the color of node i
 
     def _get_masked_weights(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Applies masks and enforces symmetry for intra-layer weights."""
@@ -379,6 +392,94 @@ class CustomBoltzmannMachine(nn.Module):
                 _sample_units()
 
         return v_next, h_next
+    
+
+
+    def gibbs_sample_step_with_coloring(self, v_current: torch.Tensor, h_current: torch.Tensor, 
+                                        update_v=True, update_h=True, track_grad = False, 
+                                        gibbs_heur_vectorize = 0):#the heur vectorize is for backwards compatibility
+        """
+        Performs one full Gibbs sampling step over all units, respecting the graph coloring
+        for parallel updates (block Gibbs sampling).
+        """
+        if v_current.dim() == 1: v_current = v_current.unsqueeze(0)
+        if h_current.dim() == 1: h_current = h_current.unsqueeze(0)
+
+        v_state = v_current.clone()
+        h_state = h_current.clone()
+
+        if track_grad:
+            W_vv, W_hh, W_vh = self._get_masked_weights()
+        else:
+            # Detach weights to prevent gradient tracking during standard sampling
+            with torch.no_grad():
+                W_vv, W_hh, W_vh = self._get_masked_weights()
+                W_vv, W_hh, W_vh = W_vv.detach(), W_hh.detach(), W_vh.detach()
+
+        def _sample_units_with_coloring(v_state, h_state, W_vv, W_hh, W_vh):
+            """
+            Performs one full block Gibbs sampling step using the graph coloring.
+            Updates all nodes of the same color in parallel.
+            """
+            num_colors = int(self.coloring.max() + 1)
+            
+            # These are mappings from the global node index (0 to num_total-1) to the
+            # index within the visible or hidden tensors (0 to num_visible-1 or 0 to num_hidden-1).
+            v_global_to_local_idx = {node: i for i, node in enumerate(self.bm_graph.visible_nodes)}
+            h_global_to_local_idx = {node: i for i, node in enumerate(self.bm_graph.hidden_nodes)}
+
+            for color in range(num_colors):
+                # Find global indices for nodes of the current color
+                nodes_in_color_global = np.where(self.coloring == color)[0]
+                
+                # Separate them into visible and hidden
+                v_nodes_global = [n for n in nodes_in_color_global if n in self.bm_graph.visible_nodes]
+                h_nodes_global = [n for n in nodes_in_color_global if n in self.bm_graph.hidden_nodes]
+
+                # Get the corresponding local indices for tensor slicing
+                v_indices_local = [v_global_to_local_idx[n] for n in v_nodes_global]
+                h_indices_local = [h_global_to_local_idx[n] for n in h_nodes_global]
+
+                if not v_indices_local and not h_indices_local:
+                    continue # No nodes of this color
+
+                # --- Update Visible Units of this color ---
+                if v_indices_local and update_v:
+                    # Fields from other visible units and all hidden units
+                    field_v_from_v = v_state @ W_vv[:, v_indices_local]
+                    field_v_from_h = h_state @ W_vh.T[:, v_indices_local]
+                    
+                    # Total local field for this block of visible units
+                    local_field_v = field_v_from_v + field_v_from_h + self.b_v[v_indices_local]
+                    
+                    # Get probability and sample
+                    prob_v = torch.sigmoid(local_field_v)
+                    new_v_states = torch.bernoulli(prob_v)
+                    
+                    # Update the main state tensor
+                    v_state[:, v_indices_local] = new_v_states
+
+                # --- Update Hidden Units of this color ---
+                if h_indices_local and update_h:
+                    # Fields from all visible units and other hidden units
+                    field_h_from_v = v_state @ W_vh[:, h_indices_local]
+                    field_h_from_h = h_state @ W_hh[:, h_indices_local]
+
+                    # Total local field for this block of hidden units
+                    local_field_h = field_h_from_v + field_h_from_h + self.b_h[h_indices_local]
+                    
+                    # Get probability and sample
+                    prob_h = torch.sigmoid(local_field_h)
+                    new_h_states = torch.bernoulli(prob_h)
+                    
+                    # Update the main state tensor
+                    h_state[:, h_indices_local] = new_h_states
+            
+            return v_state, h_state
+
+        v_state, h_state = _sample_units_with_coloring(v_state, h_state, W_vv, W_hh, W_vh)
+        
+        return v_state, h_state
 
     # Backward compatibility aliases
     def gibbs_sample_step_no_grad(self, v_current: torch.Tensor, h_current: torch.Tensor, 
@@ -437,7 +538,8 @@ class CustomBoltzmannMachine(nn.Module):
         
         # Sample from the model
         for _ in range(k_steps):
-            v_neg, h_neg = self.gibbs_sample_step(v_neg, h_neg, update_v=True, update_h=True, 
+            #CHANGED this to use "with coloring" gibbs sampling. 
+            v_neg, h_neg = self.gibbs_sample_step_with_coloring(v_neg, h_neg, update_v=True, update_h=True, 
                                                         gibbs_heur_vectorize = gibbs_heur_vectorize, 
                                                         track_grad=track_grad)
 
@@ -711,11 +813,13 @@ def train_boltzmann_machine_pcd(model: CustomBoltzmannMachine, data_loader: torc
             for _ in range(k_steps):
                 #FLAG - use grad tracking here? 
                 if track_grad: 
-                    v_neg, h_neg = model.gibbs_sample_step(v_neg, h_neg, update_v=True, update_h=True,\
-                                                           gibbs_heur_vectorize = gibbs_heur_vectorize)
+                    v_neg, h_neg = model.gibbs_sample_step_with_coloring(v_neg, h_neg, update_v=True, update_h=True,\
+                                                           gibbs_heur_vectorize = gibbs_heur_vectorize, 
+                                                           track_grad=True)
                 else: 
-                    v_neg, h_neg = model.gibbs_sample_step_no_grad(v_neg, h_neg,\
-                                                     update_v=True, update_h=True, gibbs_heur_vectorize = gibbs_heur_vectorize)
+                    v_neg, h_neg = model.gibbs_sample_step_with_coloring(v_neg, h_neg,\
+                                                     update_v=True, update_h=True, gibbs_heur_vectorize = gibbs_heur_vectorize, 
+                                                     track_grad=False)
 
             # Update persistent chain
             persistent_v = v_neg.detach()
@@ -774,7 +878,7 @@ def sample_from_bm(model: CustomBoltzmannMachine, num_samples: int, burn_in_step
                 v = torch.bernoulli(torch.full((1, model.num_visible), 0.5, device=device))
                 h = torch.bernoulli(torch.full((1, model.num_hidden), 0.5, device=device))
                 for step in range(burn_in_steps):
-                    v, h = model.gibbs_sample_step(v, h, \
+                    v, h = model.gibbs_sample_step_with_coloring(v, h, \
                                             track_grad= track_grad, gibbs_heur_vectorize= gibbs_heur_vectorize)
                     # h = enforce_fusion(h, fused_pairs, beta=10.0)
                 # if (step + 1) % (burn_in_steps // 5) == 0:  # check periodically
