@@ -36,3 +36,7 @@ override.tf.json
 .terraformrc
 terraform.rc
 __pycache__/custom_BMs.cpython-312.pyc
+GPU_OPTIMIZATION_SUMMARY.md
+gurobi.lic
+.gitignore
+test_gpu_optimization.py

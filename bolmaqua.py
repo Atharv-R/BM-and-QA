@@ -257,6 +257,14 @@ class CustomBoltzmannMachine(nn.Module):
         field_vh = h_current @ W_vh[unit_idx, :].T
         return field_vv + field_vh + self.b_v[unit_idx]
 
+    def _compute_local_field_v_optimized(self, v_current: torch.Tensor, h_current: torch.Tensor, 
+                                        unit_idx: int, W_vv_cols: torch.Tensor, W_vh_rows: torch.Tensor) -> torch.Tensor:
+        """GPU-optimized version of local field computation for visible units."""
+        # More efficient: avoid clone by computing field without self-connection directly
+        field_vv = torch.matmul(v_current, W_vv_cols[:, unit_idx]) - v_current[:, unit_idx] * W_vv_cols[unit_idx, unit_idx]
+        field_vh = torch.matmul(h_current, W_vh_rows[unit_idx, :])
+        return field_vv + field_vh + self.b_v[unit_idx]
+
     def _compute_local_field_h(self, v_current: torch.Tensor, h_current: torch.Tensor, unit_idx: int, W_hh: torch.Tensor, W_vh: torch.Tensor) -> torch.Tensor:
         """Computes the local field for a single hidden unit h_j."""
         # Exclude self-connection by masking out the diagonal
@@ -265,6 +273,14 @@ class CustomBoltzmannMachine(nn.Module):
         
         field_hh = h_masked @ W_hh[:, unit_idx]
         field_hv = v_current @ W_vh[:, unit_idx]
+        return field_hh + field_hv + self.b_h[unit_idx]
+
+    def _compute_local_field_h_optimized(self, v_current: torch.Tensor, h_current: torch.Tensor, 
+                                        unit_idx: int, W_hh_cols: torch.Tensor, W_vh_direct: torch.Tensor) -> torch.Tensor:
+        """GPU-optimized version of local field computation for hidden units."""
+        # More efficient: avoid clone by computing field without self-connection directly
+        field_hh = torch.matmul(h_current, W_hh_cols[:, unit_idx]) - h_current[:, unit_idx] * W_hh_cols[unit_idx, unit_idx]
+        field_hv = torch.matmul(v_current, W_vh_direct[:, unit_idx])
         return field_hh + field_hv + self.b_h[unit_idx]
 
     @staticmethod
@@ -297,7 +313,7 @@ class CustomBoltzmannMachine(nn.Module):
                           gibbs_heur_vectorize: bool = False, 
                           track_grad: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Performs one full single-site Gibbs sampling step.
+        Performs one full single-site Gibbs sampling step optimized for GPU.
         
         Args:
             v_current: Current visible state
@@ -310,7 +326,7 @@ class CustomBoltzmannMachine(nn.Module):
         Returns:
             Tuple of (updated_v, updated_h)
         """
-        # Handle gradient tracking
+        # Handle gradient tracking and create working copies
         if track_grad:
             v_next = v_current.clone()
             h_next = h_current.clone()
@@ -323,68 +339,76 @@ class CustomBoltzmannMachine(nn.Module):
             # Get weights without gradients for sampling
             with torch.no_grad():
                 W_vv, W_hh, W_vh = self._get_masked_weights()
+                # Detach weights to ensure no gradient tracking
                 W_vv = W_vv.detach()
                 W_hh = W_hh.detach()
                 W_vh = W_vh.detach()
 
-        # Apply no_grad context for the sampling operations if not tracking gradients
         def _sample_units():
-            nonlocal v_next, h_next  # Declare nonlocal variables at the top
+            nonlocal v_next, h_next
             
-            #vectorized version -- fast, but not fully rigorous and may cause sampling issues 
-            # nodes here are sampled in parallel, not sequentially 
-            # This is not an issue with RBMs, but we do not have RBMs here, 
-            # instead we do have some hidden to hidden and visible to visible connections 
+            # Vectorized version - GPU optimized but heuristic for non-RBM architectures
             if gibbs_heur_vectorize:
                 if update_v:
-                    # Vectorized update of all visible units simultaneously
-                    # Compute all local fields at once
+                    # Pre-compute diagonal mask for self-connections (GPU efficient)
+                    diag_mask_vv = torch.eye(self.num_visible, device=W_vv.device, dtype=W_vv.dtype)
+                    W_vv_masked = W_vv * (1 - diag_mask_vv)  # Zero out diagonal
                     
                     # Vectorized computation: batch_size x num_visible
-                    field_vv = torch.matmul(v_next, W_vv)  # V-V interactions
-                    field_vh = torch.matmul(h_next, W_vh.T)  # V-H interactions (transposed)
+                    field_vv = torch.matmul(v_next, W_vv_masked)  # V-V interactions (no self-loops)
+                    field_vh = torch.matmul(h_next, W_vh.T)  # V-H interactions
                     field_v_all = field_vv + field_vh + self.b_v.unsqueeze(0)  # Add biases
                     
-                    # Remove self-connections by zeroing diagonal contributions
-                    diagonal_contrib = v_next * torch.diag(W_vv).unsqueeze(0)
-                    field_v_all = field_v_all - diagonal_contrib
-                    
-                    # Sample all visible units simultaneously
-                    v_next = self._sample_unit_given_field(field_v_all)
+                    # Sample all visible units simultaneously using sigmoid + bernoulli
+                    probs_v = torch.sigmoid(field_v_all)
+                    v_next.copy_(torch.bernoulli(probs_v))
 
                 if update_h:
-                    # Vectorized update of all hidden units simultaneously
-                    # Compute all local fields at once
+                    # Pre-compute diagonal mask for self-connections (GPU efficient)
+                    diag_mask_hh = torch.eye(self.num_hidden, device=W_hh.device, dtype=W_hh.dtype)
+                    W_hh_masked = W_hh * (1 - diag_mask_hh)  # Zero out diagonal
                     
                     # Vectorized computation: batch_size x num_hidden
-                    field_hh = torch.matmul(h_next, W_hh)  # H-H interactions
+                    field_hh = torch.matmul(h_next, W_hh_masked)  # H-H interactions (no self-loops)
                     field_hv = torch.matmul(v_next, W_vh)  # H-V interactions
                     field_h_all = field_hh + field_hv + self.b_h.unsqueeze(0)  # Add biases
                     
-                    # Remove self-connections by zeroing diagonal contributions
-                    diagonal_contrib = h_next * torch.diag(W_hh).unsqueeze(0)
-                    field_h_all = field_h_all - diagonal_contrib
-                    
-                    # Sample all hidden units simultaneously
-                    h_next = self._sample_unit_given_field(field_h_all)
+                    # Sample all hidden units simultaneously using sigmoid + bernoulli
+                    probs_h = torch.sigmoid(field_h_all)
+                    h_next.copy_(torch.bernoulli(probs_h))
 
-            #not vectorized, this is slower but doing "proper" gibbs sampling
-            # (since we DO have hidden-hidden and visible-visible connections, 
-            # this is what we need to do for actual gibbs sampling)
+            # Sequential sampling - proper Gibbs but with GPU optimizations
             else:
+                # Pre-generate random permutations on GPU for better performance
                 if update_v:
-                    # Sequentially update each visible unit
-                    for i in torch.randperm(self.num_visible):
-                        field_v_i = self._compute_local_field_v(v_next, h_next, i, W_vv, W_vh)
-                        v_next[:, i] = self._sample_unit_given_field(field_v_i)
+                    v_perm = torch.randperm(self.num_visible, device=v_next.device)
+                    # Pre-compute weight slices to avoid repeated indexing
+                    W_vv_cols = W_vv.T  # Transpose once for column access
+                    W_vh_rows = W_vh  # Keep as is for row access
+                    
+                    for idx in range(self.num_visible):
+                        i = v_perm[idx].item()
+                        # More efficient local field computation
+                        field_v_i = self._compute_local_field_v_optimized(
+                            v_next, h_next, i, W_vv_cols, W_vh_rows)
+                        prob = torch.sigmoid(field_v_i)
+                        v_next[:, i] = torch.bernoulli(prob)
 
                 if update_h:
-                    # Sequentially update each hidden unit
-                    for j in torch.randperm(self.num_hidden):
-                        field_h_j = self._compute_local_field_h(v_next, h_next, j, W_hh, W_vh)
-                        h_next[:, j] = self._sample_unit_given_field(field_h_j)
+                    h_perm = torch.randperm(self.num_hidden, device=h_next.device)
+                    # Pre-compute weight slices
+                    W_hh_cols = W_hh.T  # Transpose once for column access
+                    W_vh_direct = W_vh  # Keep original orientation for hidden field computation
+                    
+                    for idx in range(self.num_hidden):
+                        j = h_perm[idx].item()
+                        # More efficient local field computation
+                        field_h_j = self._compute_local_field_h_optimized(
+                            v_next, h_next, j, W_hh_cols, W_vh_direct)
+                        prob = torch.sigmoid(field_h_j)
+                        h_next[:, j] = torch.bernoulli(prob)
 
-        # Execute sampling with or without gradient tracking
+        # Execute sampling with appropriate gradient context
         if track_grad:
             _sample_units()
         else:
