@@ -64,3 +64,5 @@ gurobi.lic
 test_gpu_optimization.py
 .gitignore
 .gitignore
+rbm_test_samples.png
+.gitignore
