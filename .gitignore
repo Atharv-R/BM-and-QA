@@ -35,8 +35,32 @@ override.tf.json
 # Ignore CLI configuration files
 .terraformrc
 terraform.rc
-__pycache__/custom_BMs.cpython-312.pyc
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
 GPU_OPTIMIZATION_SUMMARY.md
 gurobi.lic
 .gitignore
 test_gpu_optimization.py
+.gitignore
+.gitignore
