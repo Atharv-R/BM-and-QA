@@ -339,8 +339,6 @@ def analyze_fusion_potential(G, nodes, V_target):
     print(f"  Hidden nodes: {len(hidden_nodes)}")
     print(f"  Connected components in hidden subgraph: {num_components}")
     print(f"  Maximum fusions possible: {max_fusions_possible}")
-    print(f"  Required fusions: {len(hidden_nodes) - H_target}")
-    print(f"  Gap: {max_fusions_possible - (len(hidden_nodes) - H_target)}")
     
     # Component sizes
     comp_sizes = sorted([len(c) for c in components], reverse=True)
