@@ -85,6 +85,7 @@ Changed the logic for fusing hidden nodes. Now, it uses contracted_nodes from ne
 Improvement in training and quality of samples.
 '''
 
+from sched import scheduler
 import dwave_networkx as dnx
 import torch
 import torch.nn as nn
@@ -98,6 +99,7 @@ import pandas as pd
 import os
 from torchvision import datasets, transforms
 import gcol
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 
 # Set default device
@@ -869,23 +871,6 @@ def train_boltzmann_machine_pcd(model: CustomBoltzmannMachine, data_loader: torc
             pcd_loss.backward()
 
             optimizer.step()
-            # --- Fusion enforcement ---
-            # if fused_pairs is not None and len(fused_pairs) > 0:
-            #     tie_hidden_parameters(model, fused_pairs)
-            # total_loss += pcd_loss.item() 
-
-
-            # Checking norms for inspecting training stability
-            # with torch.no_grad():
-            #     def norm(t): return float(t.norm().item())
-            #     print("W_vh norm:", norm(model.W_vh_raw * model.mask_vh))
-            #     print("W_hh norm:", norm(model.W_hh_raw * model.mask_hh))
-            #     print("W_vv norm:", norm(model.W_vv_raw * model.mask_vv))
-            # for name, p in model.named_parameters():
-            #     if p.grad is not None:
-            #         print(name, "grad norm:", p.grad.norm().item())
-
-            # print("v_pos mean:", v_pos.mean().item(), "h_pos mean:", h_pos.mean().item())
 
         avg_loss = total_loss / len(data_loader)
         loss_history.append(avg_loss)
@@ -893,6 +878,12 @@ def train_boltzmann_machine_pcd(model: CustomBoltzmannMachine, data_loader: torc
             pll_val = compute_pseudolikelihood(model, next(iter(data_loader))[0], num_samples=50)
             pll_values.append(pll_val)
             print(f"Epoch {epoch+1}/{num_epochs} | Avg PCD Loss: {avg_loss:.4f} | PLL: {pll_val:.4f}")
+            
+         if scheduler is not None:
+            scheduler.step(pll_val)  # Update LR based on PLL
+            current_lr = optimizer.param_groups[0]['lr']
+            if epoch > 0 and current_lr != optimizer.param_groups[0]['lr']:
+                print(f"  → Learning rate adjusted to {current_lr:.6f}")
     print("PCD training complete! ✅")
     return loss_history, pll_values
 
