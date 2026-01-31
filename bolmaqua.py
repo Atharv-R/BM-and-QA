@@ -793,6 +793,7 @@ def compute_pseudolikelihood(model, v, num_samples=100):
 def train_boltzmann_machine_pcd(model: CustomBoltzmannMachine, data_loader: torch.utils.data.DataLoader,
                                 optimizer: torch.optim.Optimizer, num_epochs: int, k_steps: int = 1,
                                 batch_size: int = 64, step_size: float = 0.001, fused_pairs=None, 
+                                track_grad = False, gibbs_heur_vectorize = False, scheduler = None):
                                 track_grad = False, gibbs_heur_vectorize = False, persistent: bool = True):
     """
     Trains the Boltzmann Machine using Persistent Contrastive Divergence (PCD) or standard CD.
