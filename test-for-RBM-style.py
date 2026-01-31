@@ -24,7 +24,7 @@ from bolmaqua import (
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 RESULTS_FILE = "hyperparam_opt_results_jan22.json"
-MAX_RUNTIME_SEC = 1*60*60  # max rutime in seconds
+MAX_RUNTIME_SEC = 8*60*60  # max rutime in seconds
 OUTPUT_IMG = "best_model_samples.png"
 
 def load_data_custom_style():
@@ -54,7 +54,7 @@ def load_data_custom_style():
     
     # Binarize & Invert (custom_BMs logic: < 0.5 becomes 1)
     # Important: This matches the 'other setting' logic exactly
-    data = (torch.from_numpy(train_feats).float() < 0.5).float()
+    data = (torch.from_numpy(train_feats).float() > 0.5).float()
     
     # Split Train/Val (80/20)
     # 200 samples -> 160 train, 40 val
@@ -114,17 +114,17 @@ def get_random_params():
     # Random Search Logic
     
     # 1. Learning Rate: LogUniform between 0.001 and 0.05
-    lr = float(np.exp(np.random.uniform(np.log(0.001), np.log(0.05))))
+    lr = float(np.exp(np.random.uniform(np.log(0.0005), np.log(0.05))))
     
     # 2. L2 Reg: LogUniform between 1e-5 and 0.01
-    l2 = float(np.exp(np.random.uniform(np.log(0.00001), np.log(0.01))))
+    l2 = float(np.exp(np.random.uniform(np.log(0.000001), np.log(0.0001))))
     
     # 3. Batch Size: Discrete
     batch_size = int(random.choice([16, 32, 64]))
     
     # 4. Steps k: Discrete
     # Bias slightly towards lower k for speed, check if high k helps mixing
-    k_steps = int(random.choice([1, 1, 5, 10]))
+    k_steps = int(random.choice([1, 2, 5, 10]))
     
     # 5. Epochs: Discrete (Varying as requested)
     epochs = int(random.choice([10, 20, 40, 60, 80]))
@@ -161,95 +161,133 @@ def main():
     results = []
     
     run_id = 0
-    best_score = -float('inf') 
-    best_params = None
+    # Independent best tracking for PCD and CD
+    best_score_pcd = -float('inf') 
+    best_params_pcd = None
+    best_score_cd = -float('inf')
+    best_params_cd = None
+
+    # Define a strong baseline likely to work well
+    baseline_params = {
+        "lr": 0.005,
+        "l2": 1e-4,
+        "batch_size": 20,
+        "k_steps": 5,
+        "epochs": 60
+    }
+    use_baseline = True
 
     while (time.time() - start_time) < MAX_RUNTIME_SEC:
-        run_id += 1
-        params = get_random_params()
         
-        print(f"\n--- Run {run_id} ---")
-        print(f"Params: {json.dumps(params, indent=2)}")
+        # Decide parameters
+        if use_baseline:
+            params = baseline_params
+            tag = "BASELINE"
+            use_baseline = False
+        else:
+            params = get_random_params()
+            tag = "RANDOM"
         
-        # 1. Init Model
-        model = graph_to_bm(G, node_labels)
-        
-        # 2. Optim
-        optimizer = torch.optim.RMSprop(model.parameters(), lr=params['lr'], weight_decay=params['l2'])
-        
-        # 3. Train
-        # Only use valid batch sizes (<= num samples)
-        bs = min(params['batch_size'], len(train_data))
-        train_loader = DataLoader(TensorDataset(train_data), batch_size=bs, shuffle=True, drop_last=False)
-        
-        try:
-             # This will print per-epoch logs from bolmaqua.py
-             train_boltzmann_machine_pcd(
-                model, 
-                train_loader, 
-                optimizer, 
-                num_epochs=params['epochs'], 
-                k_steps=params['k_steps'], 
-                batch_size=bs, 
-                step_size=params['lr']
-            )
-        except Exception as e:
-            print(f"Training Failed: {e}")
-            continue
-
-        # 4. Evaluate
-        try:
-            score = evaluate_pseudolikelihood(model, val_loader)
-        except Exception as e:
-             print(f"Eval warning: {e}")
-             score = -9999.0
-
-        print(f"Result (Avg PLL): {score:.4f}")
-        
-        result_entry = {
-            "run_id": run_id,
-            "params": params,
-            "score": float(score),
-            "metric": "PseudoLikelihood (Higher Better)"
-        }
-        results.append(result_entry)
-        
-        # 5. Check Best
-        if score > best_score:
-            best_score = score
-            best_params = params
+        # Run BOTH PCD and CD for this parameter set
+        for use_pcd in [True, False]:
+            run_id += 1
+            method_label = "PCD" if use_pcd else "CD"
+            print(f"\n--- Run {run_id} ({tag} - {method_label}) ---")
+            print(f"Params: {json.dumps(params, indent=2)}")
             
-            # Save samples from best model immediately
-            print(f"New Best! Saving samples to {OUTPUT_IMG}")
+            # 1. Init Model (Re-init for every run to start fresh)
+            model = graph_to_bm(G, node_labels)
+            
+            # 2. Optim
+            optimizer = torch.optim.RMSprop(model.parameters(), lr=params['lr'], weight_decay=params['l2'])
+            
+            # 3. Train
+            bs = min(params['batch_size'], len(train_data))
+            train_loader = DataLoader(TensorDataset(train_data), batch_size=bs, shuffle=True, drop_last=False)
+            
             try:
-                samples = sample_from_bm(model, num_samples=16, burn_in_steps=1000, method='gibbs')
-                samples_np = samples.cpu().detach().numpy()
-                
-                fig, axes = plt.subplots(4, 4, figsize=(6, 6))
-                for i, ax in enumerate(axes.flat):
-                    if i < len(samples_np):
-                        ax.imshow(samples_np[i].reshape(GRID_SHAPE), cmap='gray', vmin=0, vmax=1)
-                    ax.axis('off')
-                plt.suptitle(f"Best Run {run_id}: PLL={score:.2f}")
-                plt.tight_layout()
-                plt.savefig(OUTPUT_IMG)
-                plt.close()
+                # Use the 'persistent' flag to switch modes
+                train_boltzmann_machine_pcd(
+                    model, 
+                    train_loader, 
+                    optimizer, 
+                    num_epochs=params['epochs'], 
+                    k_steps=params['k_steps'], 
+                    batch_size=bs, 
+                    step_size=params['lr'],
+                    persistent=use_pcd  # <--- Controls PCD vs CD
+                )
             except Exception as e:
-                print(f"Plotting failed: {e}")
+                print(f"Training Failed: {e}")
+                continue
+
+            # 4. Evaluate
+            try:
+                score = evaluate_pseudolikelihood(model, val_loader)
+            except Exception as e:
+                print(f"Eval warning: {e}")
+                score = -9999.0
+
+            print(f"Result (Avg PLL): {score:.4f}")
+            
+            result_entry = {
+                "run_id": run_id,
+                "params": params,
+                "method": method_label,
+                "score": float(score),
+                "metric": "PseudoLikelihood (Higher Better)"
+            }
+            results.append(result_entry)
+            
+            # 5. Check Best Independently
+            if use_pcd:
+                if score > best_score_pcd:
+                    best_score_pcd = score
+                    best_params_pcd = params
+                    out_img = f"best_model_samples_PCD.png"
+                    print(f"New Best PCD! Saving samples to {out_img}")
+                    save_best_samples(model, out_img, score, run_id, method_label)
+            else:
+                if score > best_score_cd:
+                    best_score_cd = score
+                    best_params_cd = params
+                    out_img = f"best_model_samples_CD.png"
+                    print(f"New Best CD! Saving samples to {out_img}")
+                    save_best_samples(model, out_img, score, run_id, method_label)
 
     # End Search
     print("\n==========================================")
     print("Search Complete.")
     print("==========================================")
-    print(f"Best Score: {best_score}")
-    print(f"Best Params: {json.dumps(best_params, indent=2)}")
+    print(f"Best PCD Score: {best_score_pcd}")
+    print(f"Best PCD Params: {json.dumps(best_params_pcd, indent=2)}")
+    print(f"Best CD Score: {best_score_cd}")
+    print(f"Best CD Params: {json.dumps(best_params_cd, indent=2)}")
     
     # Save all results
     with open(RESULTS_FILE, 'w') as f:
         json.dump(results, f, indent=4)
     print(f"Results saved to {RESULTS_FILE}")
 
+def save_best_samples(model, filename, score, run_id, method_label):
+    try:
+        samples = sample_from_bm(model, num_samples=16, burn_in_steps=1000, method='gibbs')
+        samples_np = samples.cpu().detach().numpy()
+        
+        fig, axes = plt.subplots(4, 4, figsize=(6, 6))
+        for i, ax in enumerate(axes.flat):
+            if i < len(samples_np):
+                ax.imshow(samples_np[i].reshape(GRID_SHAPE), cmap='gray', vmin=0, vmax=1)
+            ax.axis('off')
+        plt.suptitle(f"Best {method_label} Run {run_id}: PLL={score:.2f}")
+        plt.tight_layout()
+        plt.savefig(filename)
+        plt.close()
+    except Exception as e:
+        print(f"Plotting failed: {e}")
+
 if __name__ == "__main__":
     main()
+
 
 

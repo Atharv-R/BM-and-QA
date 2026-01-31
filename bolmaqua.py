@@ -787,19 +787,21 @@ def compute_pseudolikelihood(model, v, num_samples=100):
 
     return np.mean(pll_vals)
 
-# Training with Persistent Contrastive Divergence (PCD)
+# Training with Persistent Contrastive Divergence (PCD) or Contrastive Divergence (CD)
 def train_boltzmann_machine_pcd(model: CustomBoltzmannMachine, data_loader: torch.utils.data.DataLoader,
                                 optimizer: torch.optim.Optimizer, num_epochs: int, k_steps: int = 1,
                                 batch_size: int = 64, step_size: float = 0.001, fused_pairs=None, 
-                                track_grad = False, gibbs_heur_vectorize = False):
+                                track_grad = False, gibbs_heur_vectorize = False, persistent: bool = True):
     """
-    Trains the Boltzmann Machine using Persistent Contrastive Divergence (PCD).
-    Maintains persistent chains across batches and epochs.
+    Trains the Boltzmann Machine using Persistent Contrastive Divergence (PCD) or standard CD.
+    Maintains persistent chains across batches and epochs if persistent=True.
+    If persistent=False, it performs standard CD (starts negative chain from data).
     """
     loss_history = []
     pll_values = []
     model.train()
-    print(f"Starting PCD training on {device} for {num_epochs} epochs... 🏋️")
+    method_name = "PCD" if persistent else "CD"
+    print(f"Starting {method_name} training on {device} for {num_epochs} epochs... 🏋️")
 
     for param_group in optimizer.param_groups:
         param_group['lr'] = step_size
@@ -818,8 +820,8 @@ def train_boltzmann_machine_pcd(model: CustomBoltzmannMachine, data_loader: torc
             batch = batch_data[0].to(device)
             current_batch_size = batch.shape[0]
 
-            # Initialize or resize persistent chains
-            if (persistent_v is None) or (persistent_v.shape[0] != current_batch_size):
+            # Initialize or resize persistent chains (only relevant if persistent=True)
+            if persistent and ((persistent_v is None) or (persistent_v.shape[0] != current_batch_size)):
                 persistent_v = torch.bernoulli(torch.full((current_batch_size, model.num_visible), 0.5, device=device))
                 persistent_h = torch.bernoulli(torch.full((current_batch_size, model.num_hidden), 0.5, device=device))
 
@@ -831,9 +833,17 @@ def train_boltzmann_machine_pcd(model: CustomBoltzmannMachine, data_loader: torc
             for _ in range(model.k_gibbs_positive):
                 v_pos, h_pos = model.mean_field_update(v_pos, h_pos, update_v=False, update_h=True)
 
-            # --- Negative Phase (persistent chain) ---
-            v_neg = persistent_v.clone()
-            h_neg = persistent_h.clone()
+            # --- Negative Phase ---
+            if persistent:
+                # PCD: Start from persistent chain
+                v_neg = persistent_v.clone()
+                h_neg = persistent_h.clone()
+            else:
+                # CD: Start from data (positive phase result)
+                # v_pos is the data batch
+                v_neg = v_pos.detach().clone()
+                h_neg = h_pos.detach().clone()
+
             for _ in range(k_steps):
                 #FLAG - use grad tracking here? 
                 if track_grad: 
@@ -845,13 +855,15 @@ def train_boltzmann_machine_pcd(model: CustomBoltzmannMachine, data_loader: torc
                                                      update_v=True, update_h=True, gibbs_heur_vectorize = gibbs_heur_vectorize, 
                                                      track_grad=False)
 
-            # Update persistent chain
-            persistent_v = v_neg.detach()
-            persistent_h = h_neg.detach()
+            # Update persistent chain if using PCD
+            if persistent:
+                persistent_v = v_neg.detach()
+                persistent_h = h_neg.detach()
 
             # --- Loss ---
             pos_energy = model.energy(v_pos, h_pos).mean()
             neg_energy = model.energy(v_neg, h_neg).mean()
+            # If standard CD, we are minimizing the difference, same loss form:
             pcd_loss = pos_energy - neg_energy
 
             pcd_loss.backward()
@@ -860,7 +872,8 @@ def train_boltzmann_machine_pcd(model: CustomBoltzmannMachine, data_loader: torc
             # --- Fusion enforcement ---
             # if fused_pairs is not None and len(fused_pairs) > 0:
             #     tie_hidden_parameters(model, fused_pairs)
-            # total_loss += pcd_loss.item()
+            # total_loss += pcd_loss.item() 
+
 
             # Checking norms for inspecting training stability
             # with torch.no_grad():
