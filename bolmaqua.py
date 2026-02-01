@@ -83,6 +83,10 @@ Added targeted reduction of hidden nodes
 10/03/25
 Changed the logic for fusing hidden nodes. Now, it uses contracted_nodes from networkx to merge low-degree neighboring hidden nodes.
 Improvement in training and quality of samples.
+
+01/30/26
+Added Scheduler to reduce learning rate on plateau.
+Added reconstruction loss tracking during training.
 '''
 
 from sched import scheduler
@@ -789,12 +793,66 @@ def compute_pseudolikelihood(model, v, num_samples=100):
 
     return np.mean(pll_vals)
 
-# Training with Persistent Contrastive Divergence (PCD) or Contrastive Divergence (CD)
+def evaluate_reconstruction(model, test_data, num_samples=100):
+    """
+    Measure how well the model can reconstruct input data.
+    Lower MSE = better learning.
+    Enhance with BCE metric for binary data.
+    """
+    model.eval()
+    
+    # Sample subset of data
+    if len(test_data) > num_samples:
+        indices = torch.randperm(len(test_data))[:num_samples]
+        test_batch = test_data[indices].to(device)
+    else:
+        test_batch = test_data.to(device)
+        num_samples = len(test_data)
+    
+    reconstructions = []
+    
+    with torch.no_grad():
+        for i in range(num_samples):
+            v_data = test_batch[i].unsqueeze(0)
+            
+            # Encode: infer hidden states from visible
+            h = torch.full((1, model.num_hidden), 0.5, device=device)
+            for _ in range(model.k_gibbs_positive):  # Use same as training
+                _, h = model.mean_field_update(v_data, h, update_v=False, update_h=True)
+            
+            # Decode: reconstruct visible from hidden
+            v_recon = torch.full((1, model.num_visible), 0.5, device=device)
+            for _ in range(model.k_gibbs_positive):
+                v_recon, _ = model.mean_field_update(v_recon, h, update_v=True, update_h=False)
+            
+            reconstructions.append(v_recon)
+    
+    reconstructions = torch.cat(reconstructions, dim=0)
+    
+    # Clamp to avoid log(0) in BCE
+    recon_clamped = reconstructions.clamp(1e-7, 1 - 1e-7)
+
+    # Calculate metrics
+    mse = F.mse_loss(reconstructions, test_batch)
+    bce = F.binary_cross_entropy(recon_clamped, test_batch) 
+    
+    # Binary accuracy (for binary data)
+    binary_recon = (reconstructions > 0.5).float()
+    binary_accuracy = (binary_recon == test_batch).float().mean()
+    
+    model.train()  # Switch back to training mode
+    
+    return {
+        'mse': mse.item(),
+        'bce': bce.item(),
+        'accuracy': binary_accuracy.item()
+    }
+
+# Training with Persistent Contrastive Divergence (PCD)
 def train_boltzmann_machine_pcd(model: CustomBoltzmannMachine, data_loader: torch.utils.data.DataLoader,
                                 optimizer: torch.optim.Optimizer, num_epochs: int, k_steps: int = 1,
                                 batch_size: int = 64, step_size: float = 0.001, fused_pairs=None, 
-                                track_grad = False, gibbs_heur_vectorize = False, scheduler = None):
-                                track_grad = False, gibbs_heur_vectorize = False, persistent: bool = True):
+                                track_grad = False, gibbs_heur_vectorize = False, scheduler = None, val_data=None, train_data=None,persistent: bool = True):
     """
     Trains the Boltzmann Machine using Persistent Contrastive Divergence (PCD) or standard CD.
     Maintains persistent chains across batches and epochs if persistent=True.
@@ -802,6 +860,13 @@ def train_boltzmann_machine_pcd(model: CustomBoltzmannMachine, data_loader: torc
     """
     loss_history = []
     pll_values = []
+    recon_mse_history = []  
+    recon_acc_history = []    
+    train_recon_mse_history = []  
+    train_recon_acc_history = []
+    train_recon_bce_history = []
+    val_recon_bce_history = []
+
     model.train()
     method_name = "PCD" if persistent else "CD"
     print(f"Starting {method_name} training on {device} for {num_epochs} epochs... 🏋️")
@@ -872,21 +937,56 @@ def train_boltzmann_machine_pcd(model: CustomBoltzmannMachine, data_loader: torc
             pcd_loss.backward()
 
             optimizer.step()
+            total_loss += pcd_loss.item()
 
         avg_loss = total_loss / len(data_loader)
         loss_history.append(avg_loss)
         with torch.no_grad():
             pll_val = compute_pseudolikelihood(model, next(iter(data_loader))[0], num_samples=50)
             pll_values.append(pll_val)
-            print(f"Epoch {epoch+1}/{num_epochs} | Avg PCD Loss: {avg_loss:.4f} | PLL: {pll_val:.4f}")
+
+            # ADD RECONSTRUCTION EVAL:
+            if train_data is not None:
+                train_metrics = evaluate_reconstruction(model, train_data, num_samples=50)
+                train_recon_mse_history.append(train_metrics['mse'])
+                train_recon_bce_history.append(train_metrics['bce'])
+                train_recon_acc_history.append(train_metrics['accuracy'])
             
-         if scheduler is not None:
+            if val_data is not None:
+                from torch.nn import functional as F  # Make sure this is imported
+                val_metrics = evaluate_reconstruction(model, val_data, num_samples=50)
+                val_mse = val_metrics['mse']
+                val_bce = val_metrics['bce']
+                val_acc = val_metrics['accuracy']
+                val_recon_bce_history.append(val_bce)
+                recon_mse_history.append(val_mse)
+                recon_acc_history.append(val_acc)
+                if train_data is not None:
+                    print(f"Epoch {epoch+1}/{num_epochs} | PCD: {avg_loss:.4f} | PLL: {pll_val:.4f} | "
+                        f"Train Recon: MSE={train_metrics['mse']:.4f} BCE={train_metrics['bce']:.4f} Acc={train_metrics['accuracy']:.3f} | "
+                        f"Val Recon: MSE={val_mse:.4f} BCE={val_bce:.4f} Acc={val_acc:.3f}")
+                else:
+                    print(f"Epoch {epoch+1}/{num_epochs} | PCD: {avg_loss:.4f} | PLL: {pll_val:.4f} | "
+                        f"Val Recon: MSE={val_mse:.4f} Acc={val_acc:.3f}")
+               
+            
+        if scheduler is not None:
             scheduler.step(pll_val)  # Update LR based on PLL
             current_lr = optimizer.param_groups[0]['lr']
             if epoch > 0 and current_lr != optimizer.param_groups[0]['lr']:
                 print(f"  → Learning rate adjusted to {current_lr:.6f}")
+    
     print("PCD training complete! ✅")
-    return loss_history, pll_values
+    return {
+        'pcd_loss': loss_history,
+        'pll': pll_values,
+        'train_recon_mse': train_recon_mse_history,
+        'train_recon_bce': train_recon_bce_history,
+        'train_recon_acc': train_recon_acc_history,
+        'val_recon_mse': recon_mse_history,
+        'val_recon_bce': val_recon_bce_history,
+        'val_recon_acc': recon_acc_history
+    }
 
 
 
