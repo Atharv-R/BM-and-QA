@@ -83,8 +83,13 @@ Added targeted reduction of hidden nodes
 10/03/25
 Changed the logic for fusing hidden nodes. Now, it uses contracted_nodes from networkx to merge low-degree neighboring hidden nodes.
 Improvement in training and quality of samples.
+
+01/30/26
+Added Scheduler to reduce learning rate on plateau.
+Added reconstruction loss tracking during training.
 '''
 
+from sched import scheduler
 import dwave_networkx as dnx
 import torch
 import torch.nn as nn
@@ -98,6 +103,7 @@ import pandas as pd
 import os
 from torchvision import datasets, transforms
 import gcol
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 
 # Set default device
@@ -787,19 +793,83 @@ def compute_pseudolikelihood(model, v, num_samples=100):
 
     return np.mean(pll_vals)
 
+def evaluate_reconstruction(model, test_data, num_samples=100):
+    """
+    Measure how well the model can reconstruct input data.
+    Lower MSE = better learning.
+    Enhance with BCE metric for binary data.
+    """
+    model.eval()
+    
+    # Sample subset of data
+    if len(test_data) > num_samples:
+        indices = torch.randperm(len(test_data))[:num_samples]
+        test_batch = test_data[indices].to(device)
+    else:
+        test_batch = test_data.to(device)
+        num_samples = len(test_data)
+    
+    reconstructions = []
+    
+    with torch.no_grad():
+        for i in range(num_samples):
+            v_data = test_batch[i].unsqueeze(0)
+            
+            # Encode: infer hidden states from visible
+            h = torch.full((1, model.num_hidden), 0.5, device=device)
+            for _ in range(model.k_gibbs_positive):  # Use same as training
+                _, h = model.mean_field_update(v_data, h, update_v=False, update_h=True)
+            
+            # Decode: reconstruct visible from hidden
+            v_recon = torch.full((1, model.num_visible), 0.5, device=device)
+            for _ in range(model.k_gibbs_positive):
+                v_recon, _ = model.mean_field_update(v_recon, h, update_v=True, update_h=False)
+            
+            reconstructions.append(v_recon)
+    
+    reconstructions = torch.cat(reconstructions, dim=0)
+    
+    # Clamp to avoid log(0) in BCE
+    recon_clamped = reconstructions.clamp(1e-7, 1 - 1e-7)
+
+    # Calculate metrics
+    mse = F.mse_loss(reconstructions, test_batch)
+    bce = F.binary_cross_entropy(recon_clamped, test_batch) 
+    
+    # Binary accuracy (for binary data)
+    binary_recon = (reconstructions > 0.5).float()
+    binary_accuracy = (binary_recon == test_batch).float().mean()
+    
+    model.train()  # Switch back to training mode
+    
+    return {
+        'mse': mse.item(),
+        'bce': bce.item(),
+        'accuracy': binary_accuracy.item()
+    }
+
 # Training with Persistent Contrastive Divergence (PCD)
 def train_boltzmann_machine_pcd(model: CustomBoltzmannMachine, data_loader: torch.utils.data.DataLoader,
                                 optimizer: torch.optim.Optimizer, num_epochs: int, k_steps: int = 1,
                                 batch_size: int = 64, step_size: float = 0.001, fused_pairs=None, 
-                                track_grad = False, gibbs_heur_vectorize = False):
+                                track_grad = False, gibbs_heur_vectorize = False, scheduler = None, val_data=None, train_data=None,persistent: bool = True):
     """
-    Trains the Boltzmann Machine using Persistent Contrastive Divergence (PCD).
-    Maintains persistent chains across batches and epochs.
+    Trains the Boltzmann Machine using Persistent Contrastive Divergence (PCD) or standard CD.
+    Maintains persistent chains across batches and epochs if persistent=True.
+    If persistent=False, it performs standard CD (starts negative chain from data).
     """
     loss_history = []
     pll_values = []
+    recon_mse_history = []  
+    recon_acc_history = []    
+    train_recon_mse_history = []  
+    train_recon_acc_history = []
+    train_recon_bce_history = []
+    val_recon_bce_history = []
+
     model.train()
-    print(f"Starting PCD training on {device} for {num_epochs} epochs... 🏋️")
+    method_name = "PCD" if persistent else "CD"
+    print(f"Starting {method_name} training on {device} for {num_epochs} epochs... 🏋️")
 
     for param_group in optimizer.param_groups:
         param_group['lr'] = step_size
@@ -818,8 +888,8 @@ def train_boltzmann_machine_pcd(model: CustomBoltzmannMachine, data_loader: torc
             batch = batch_data[0].to(device)
             current_batch_size = batch.shape[0]
 
-            # Initialize or resize persistent chains
-            if (persistent_v is None) or (persistent_v.shape[0] != current_batch_size):
+            # Initialize or resize persistent chains (only relevant if persistent=True)
+            if persistent and ((persistent_v is None) or (persistent_v.shape[0] != current_batch_size)):
                 persistent_v = torch.bernoulli(torch.full((current_batch_size, model.num_visible), 0.5, device=device))
                 persistent_h = torch.bernoulli(torch.full((current_batch_size, model.num_hidden), 0.5, device=device))
 
@@ -831,9 +901,17 @@ def train_boltzmann_machine_pcd(model: CustomBoltzmannMachine, data_loader: torc
             for _ in range(model.k_gibbs_positive):
                 v_pos, h_pos = model.mean_field_update(v_pos, h_pos, update_v=False, update_h=True)
 
-            # --- Negative Phase (persistent chain) ---
-            v_neg = persistent_v.clone()
-            h_neg = persistent_h.clone()
+            # --- Negative Phase ---
+            if persistent:
+                # PCD: Start from persistent chain
+                v_neg = persistent_v.clone()
+                h_neg = persistent_h.clone()
+            else:
+                # CD: Start from data (positive phase result)
+                # v_pos is the data batch
+                v_neg = v_pos.detach().clone()
+                h_neg = h_pos.detach().clone()
+
             for _ in range(k_steps):
                 #FLAG - use grad tracking here? 
                 if track_grad: 
@@ -845,43 +923,70 @@ def train_boltzmann_machine_pcd(model: CustomBoltzmannMachine, data_loader: torc
                                                      update_v=True, update_h=True, gibbs_heur_vectorize = gibbs_heur_vectorize, 
                                                      track_grad=False)
 
-            # Update persistent chain
-            persistent_v = v_neg.detach()
-            persistent_h = h_neg.detach()
+            # Update persistent chain if using PCD
+            if persistent:
+                persistent_v = v_neg.detach()
+                persistent_h = h_neg.detach()
 
             # --- Loss ---
             pos_energy = model.energy(v_pos, h_pos).mean()
             neg_energy = model.energy(v_neg, h_neg).mean()
+            # If standard CD, we are minimizing the difference, same loss form:
             pcd_loss = pos_energy - neg_energy
 
             pcd_loss.backward()
 
             optimizer.step()
-            # --- Fusion enforcement ---
-            # if fused_pairs is not None and len(fused_pairs) > 0:
-            #     tie_hidden_parameters(model, fused_pairs)
-            # total_loss += pcd_loss.item()
-
-            # Checking norms for inspecting training stability
-            # with torch.no_grad():
-            #     def norm(t): return float(t.norm().item())
-            #     print("W_vh norm:", norm(model.W_vh_raw * model.mask_vh))
-            #     print("W_hh norm:", norm(model.W_hh_raw * model.mask_hh))
-            #     print("W_vv norm:", norm(model.W_vv_raw * model.mask_vv))
-            # for name, p in model.named_parameters():
-            #     if p.grad is not None:
-            #         print(name, "grad norm:", p.grad.norm().item())
-
-            # print("v_pos mean:", v_pos.mean().item(), "h_pos mean:", h_pos.mean().item())
+            total_loss += pcd_loss.item()
 
         avg_loss = total_loss / len(data_loader)
         loss_history.append(avg_loss)
         with torch.no_grad():
             pll_val = compute_pseudolikelihood(model, next(iter(data_loader))[0], num_samples=50)
             pll_values.append(pll_val)
-            print(f"Epoch {epoch+1}/{num_epochs} | Avg PCD Loss: {avg_loss:.4f} | PLL: {pll_val:.4f}")
+
+            # ADD RECONSTRUCTION EVAL:
+            if train_data is not None:
+                train_metrics = evaluate_reconstruction(model, train_data, num_samples=50)
+                train_recon_mse_history.append(train_metrics['mse'])
+                train_recon_bce_history.append(train_metrics['bce'])
+                train_recon_acc_history.append(train_metrics['accuracy'])
+            
+            if val_data is not None:
+                from torch.nn import functional as F  # Make sure this is imported
+                val_metrics = evaluate_reconstruction(model, val_data, num_samples=50)
+                val_mse = val_metrics['mse']
+                val_bce = val_metrics['bce']
+                val_acc = val_metrics['accuracy']
+                val_recon_bce_history.append(val_bce)
+                recon_mse_history.append(val_mse)
+                recon_acc_history.append(val_acc)
+                if train_data is not None:
+                    print(f"Epoch {epoch+1}/{num_epochs} | PCD: {avg_loss:.4f} | PLL: {pll_val:.4f} | "
+                        f"Train Recon: MSE={train_metrics['mse']:.4f} BCE={train_metrics['bce']:.4f} Acc={train_metrics['accuracy']:.3f} | "
+                        f"Val Recon: MSE={val_mse:.4f} BCE={val_bce:.4f} Acc={val_acc:.3f}")
+                else:
+                    print(f"Epoch {epoch+1}/{num_epochs} | PCD: {avg_loss:.4f} | PLL: {pll_val:.4f} | "
+                        f"Val Recon: MSE={val_mse:.4f} Acc={val_acc:.3f}")
+               
+            
+        if scheduler is not None:
+            scheduler.step(pll_val)  # Update LR based on PLL
+            current_lr = optimizer.param_groups[0]['lr']
+            if epoch > 0 and current_lr != optimizer.param_groups[0]['lr']:
+                print(f"  → Learning rate adjusted to {current_lr:.6f}")
+    
     print("PCD training complete! ✅")
-    return loss_history, pll_values
+    return {
+        'pcd_loss': loss_history,
+        'pll': pll_values,
+        'train_recon_mse': train_recon_mse_history,
+        'train_recon_bce': train_recon_bce_history,
+        'train_recon_acc': train_recon_acc_history,
+        'val_recon_mse': recon_mse_history,
+        'val_recon_bce': val_recon_bce_history,
+        'val_recon_acc': recon_acc_history
+    }
 
 
 
