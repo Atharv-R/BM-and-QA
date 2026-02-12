@@ -314,9 +314,8 @@ class CustomBoltzmannMachine(nn.Module):
 
         return vbias_term + vv_term + hidden_term
 
-    def gibbs_sample_step(self, v_current: torch.Tensor, h_current: torch.Tensor, 
-                          update_v: bool = True, update_h: bool = True, 
-                          gibbs_heur_vectorize: bool = False, 
+    def gibbs_sample_step(self, v_current: torch.Tensor, h_current: torch.Tensor,
+                          update_v: bool = True, update_h: bool = True,
                           track_grad: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Performs one full single-site Gibbs sampling step optimized for GPU.
@@ -326,7 +325,6 @@ class CustomBoltzmannMachine(nn.Module):
             h_current: Current hidden state  
             update_v: Whether to update visible units
             update_h: Whether to update hidden units
-            gibbs_heur_vectorize: Whether to use vectorized (parallel) sampling
             track_grad: Whether to track gradients. If False, detaches inputs and uses no_grad context.
         
         Returns:
@@ -353,66 +351,30 @@ class CustomBoltzmannMachine(nn.Module):
         def _sample_units():
             nonlocal v_next, h_next
             
-            # Vectorized version - GPU optimized but heuristic for non-RBM architectures
-            if gibbs_heur_vectorize:
-                if update_v:
-                    # Pre-compute diagonal mask for self-connections (GPU efficient)
-                    diag_mask_vv = torch.eye(self.num_visible, device=W_vv.device, dtype=W_vv.dtype)
-                    W_vv_masked = W_vv * (1 - diag_mask_vv)  # Zero out diagonal
-                    
-                    # Vectorized computation: batch_size x num_visible
-                    field_vv = torch.matmul(v_next, W_vv_masked)  # V-V interactions (no self-loops)
-                    field_vh = torch.matmul(h_next, W_vh.T)  # V-H interactions
-                    field_v_all = field_vv + field_vh + self.b_v.unsqueeze(0)  # Add biases
-                    
-                    # Sample all visible units simultaneously using sigmoid + bernoulli
-                    probs_v = torch.sigmoid(field_v_all)
-                    v_next.copy_(torch.bernoulli(probs_v))
+            # Sequential sampling - proper Gibbs with GPU-aware local-field computation
+            if update_v:
+                v_perm = torch.randperm(self.num_visible, device=v_next.device)
+                W_vv_cols = W_vv.T
+                W_vh_rows = W_vh
 
-                if update_h:
-                    # Pre-compute diagonal mask for self-connections (GPU efficient)
-                    diag_mask_hh = torch.eye(self.num_hidden, device=W_hh.device, dtype=W_hh.dtype)
-                    W_hh_masked = W_hh * (1 - diag_mask_hh)  # Zero out diagonal
-                    
-                    # Vectorized computation: batch_size x num_hidden
-                    field_hh = torch.matmul(h_next, W_hh_masked)  # H-H interactions (no self-loops)
-                    field_hv = torch.matmul(v_next, W_vh)  # H-V interactions
-                    field_h_all = field_hh + field_hv + self.b_h.unsqueeze(0)  # Add biases
-                    
-                    # Sample all hidden units simultaneously using sigmoid + bernoulli
-                    probs_h = torch.sigmoid(field_h_all)
-                    h_next.copy_(torch.bernoulli(probs_h))
+                for idx in range(self.num_visible):
+                    i = v_perm[idx].item()
+                    field_v_i = self._compute_local_field_v_optimized(
+                        v_next, h_next, i, W_vv_cols, W_vh_rows)
+                    prob = torch.sigmoid(field_v_i)
+                    v_next[:, i] = torch.bernoulli(prob)
 
-            # Sequential sampling - proper Gibbs but with GPU optimizations
-            else:
-                # Pre-generate random permutations on GPU for better performance
-                if update_v:
-                    v_perm = torch.randperm(self.num_visible, device=v_next.device)
-                    # Pre-compute weight slices to avoid repeated indexing
-                    W_vv_cols = W_vv.T  # Transpose once for column access
-                    W_vh_rows = W_vh  # Keep as is for row access
-                    
-                    for idx in range(self.num_visible):
-                        i = v_perm[idx].item()
-                        # More efficient local field computation
-                        field_v_i = self._compute_local_field_v_optimized(
-                            v_next, h_next, i, W_vv_cols, W_vh_rows)
-                        prob = torch.sigmoid(field_v_i)
-                        v_next[:, i] = torch.bernoulli(prob)
+            if update_h:
+                h_perm = torch.randperm(self.num_hidden, device=h_next.device)
+                W_hh_cols = W_hh.T
+                W_vh_direct = W_vh
 
-                if update_h:
-                    h_perm = torch.randperm(self.num_hidden, device=h_next.device)
-                    # Pre-compute weight slices
-                    W_hh_cols = W_hh.T  # Transpose once for column access
-                    W_vh_direct = W_vh  # Keep original orientation for hidden field computation
-                    
-                    for idx in range(self.num_hidden):
-                        j = h_perm[idx].item()
-                        # More efficient local field computation
-                        field_h_j = self._compute_local_field_h_optimized(
-                            v_next, h_next, j, W_hh_cols, W_vh_direct)
-                        prob = torch.sigmoid(field_h_j)
-                        h_next[:, j] = torch.bernoulli(prob)
+                for idx in range(self.num_hidden):
+                    j = h_perm[idx].item()
+                    field_h_j = self._compute_local_field_h_optimized(
+                        v_next, h_next, j, W_hh_cols, W_vh_direct)
+                    prob = torch.sigmoid(field_h_j)
+                    h_next[:, j] = torch.bernoulli(prob)
 
         # Execute sampling with appropriate gradient context
         if track_grad:
@@ -425,9 +387,8 @@ class CustomBoltzmannMachine(nn.Module):
     
 
 
-    def gibbs_sample_step_with_coloring(self, v_current: torch.Tensor, h_current: torch.Tensor, 
-                                        update_v=True, update_h=True, track_grad = False, 
-                                        gibbs_heur_vectorize = 0):#the heur vectorize is for backwards compatibility
+    def gibbs_sample_step_with_coloring(self, v_current: torch.Tensor, h_current: torch.Tensor,
+                                        update_v=True, update_h=True, track_grad=False):
         """
         Performs one full Gibbs sampling step over all units, respecting the graph coloring
         for parallel updates (block Gibbs sampling).
@@ -513,36 +474,59 @@ class CustomBoltzmannMachine(nn.Module):
 
     # Backward compatibility aliases
     def gibbs_sample_step_no_grad(self, v_current: torch.Tensor, h_current: torch.Tensor, 
-                                  update_v: bool = True, update_h: bool = True,
-                                  gibbs_heur_vectorize: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
+                                  update_v: bool = True, update_h: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
         """
         DEPRECATED: Use gibbs_sample_step with track_grad=False instead.
         Performs one full single-site Gibbs sampling step WITHOUT gradient tracking.
         """
-        return self.gibbs_sample_step(v_current, h_current, update_v, update_h, 
-                                    gibbs_heur_vectorize, track_grad=False)
+        return self.gibbs_sample_step(v_current, h_current, update_v, update_h, track_grad=False)
 
     def mean_field_update(self, v: torch.Tensor, h: torch.Tensor, 
                          update_v: bool = True, update_h: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Performs a mean-field update (deterministic) instead of sampling.
+        Uses graph coloring for vectorized parallel updates within each color class.
         This can be used for the positive phase to avoid sampling issues.
         """
-        W_vv, W_hh, W_vh = self._get_masked_weights()
+        if v.dim() == 1: v = v.unsqueeze(0)
+        if h.dim() == 1: h = h.unsqueeze(0)
+
         v_next = v.clone()
         h_next = h.clone()
 
-        # # old, not vectorized! 
-        if update_v:
-            for i in range(self.num_visible):
-                field_v_i = self._compute_local_field_v(v_next, h_next, i, W_vv, W_vh)
-                v_next[:, i] = torch.sigmoid(field_v_i)
-        
-        if update_h:
-            for j in range(self.num_hidden):
-                field_h_j = self._compute_local_field_h(v_next, h_next, j, W_hh, W_vh)
-                h_next[:, j] = torch.sigmoid(field_h_j)
-                
+        W_vv, W_hh, W_vh = self._get_masked_weights()
+
+        num_colors = int(self.coloring.max() + 1)
+
+        v_global_to_local_idx = {node: i for i, node in enumerate(self.bm_graph.visible_nodes)}
+        h_global_to_local_idx = {node: i for i, node in enumerate(self.bm_graph.hidden_nodes)}
+
+        for color in range(num_colors):
+            nodes_in_color_global = np.where(self.coloring == color)[0]
+
+            v_nodes_global = [n for n in nodes_in_color_global if n in self.bm_graph.visible_nodes]
+            h_nodes_global = [n for n in nodes_in_color_global if n in self.bm_graph.hidden_nodes]
+
+            v_indices_local = [v_global_to_local_idx[n] for n in v_nodes_global]
+            h_indices_local = [h_global_to_local_idx[n] for n in h_nodes_global]
+
+            if not v_indices_local and not h_indices_local:
+                continue
+
+            # --- Update Visible Units of this color (deterministic) ---
+            if v_indices_local and update_v:
+                field_v_from_v = v_next @ W_vv[:, v_indices_local]
+                field_v_from_h = h_next @ W_vh.T[:, v_indices_local]
+                local_field_v = field_v_from_v + field_v_from_h + self.b_v[v_indices_local]
+                v_next[:, v_indices_local] = torch.sigmoid(local_field_v)
+
+            # --- Update Hidden Units of this color (deterministic) ---
+            if h_indices_local and update_h:
+                field_h_from_v = v_next @ W_vh[:, h_indices_local]
+                field_h_from_h = h_next @ W_hh[:, h_indices_local]
+                local_field_h = field_h_from_v + field_h_from_h + self.b_h[h_indices_local]
+                h_next[:, h_indices_local] = torch.sigmoid(local_field_h)
+
         return v_next, h_next
 
     def forward(self, v_data: torch.Tensor, k_steps: int = 1) -> tuple[torch.Tensor, torch.Tensor]:
@@ -568,13 +552,15 @@ class CustomBoltzmannMachine(nn.Module):
         
         # Sample from the model
         for _ in range(k_steps):
-            #CHANGED this to use "with coloring" gibbs sampling. 
-            v_neg, h_neg = self.gibbs_sample_step_with_coloring(v_neg, h_neg, update_v=True, update_h=True, 
-                                                        gibbs_heur_vectorize = gibbs_heur_vectorize, 
-                                                        track_grad=track_grad)
+            v_neg, h_neg = self.gibbs_sample_step_with_coloring(
+                v_neg,
+                h_neg,
+                update_v=True,
+                update_h=True,
+            )
 
         # --- Loss Calculation ---
-        pos_energy = self.energy(v_pos, h_pos).mean()
+        pos_energy = self.energy(v_pos.detach(), h_pos.detach()).mean()
         neg_energy = self.energy(v_neg, h_neg).mean()
         cd_loss = pos_energy - neg_energy
 
@@ -852,11 +838,15 @@ def evaluate_reconstruction(model, test_data, num_samples=100):
 def train_boltzmann_machine_pcd(model: CustomBoltzmannMachine, data_loader: torch.utils.data.DataLoader,
                                 optimizer: torch.optim.Optimizer, num_epochs: int, k_steps: int = 1,
                                 batch_size: int = 64, step_size: float = 0.001, fused_pairs=None, 
-                                track_grad = False, gibbs_heur_vectorize = False, scheduler = None, val_data=None, train_data=None,persistent: bool = True):
+                                track_grad = False, scheduler = None, val_data=None, train_data=None,
+                                persistent: bool = True, eval_every: int = 5):
     """
     Trains the Boltzmann Machine using Persistent Contrastive Divergence (PCD) or standard CD.
     Maintains persistent chains across batches and epochs if persistent=True.
     If persistent=False, it performs standard CD (starts negative chain from data).
+    If scheduler is ReduceLROnPlateau and stepped with PLL, use mode='max'.
+    eval_every: Compute and print reconstruction metrics every eval_every epochs (1-indexed).
+                PCD loss and PLL are always printed every epoch.
     """
     loss_history = []
     pll_values = []
@@ -916,11 +906,10 @@ def train_boltzmann_machine_pcd(model: CustomBoltzmannMachine, data_loader: torc
                 #FLAG - use grad tracking here? 
                 if track_grad: 
                     v_neg, h_neg = model.gibbs_sample_step_with_coloring(v_neg, h_neg, update_v=True, update_h=True,\
-                                                           gibbs_heur_vectorize = gibbs_heur_vectorize, 
                                                            track_grad=True)
                 else: 
                     v_neg, h_neg = model.gibbs_sample_step_with_coloring(v_neg, h_neg,\
-                                                     update_v=True, update_h=True, gibbs_heur_vectorize = gibbs_heur_vectorize, 
+                                                     update_v=True, update_h=True,
                                                      track_grad=False)
 
             # Update persistent chain if using PCD
@@ -929,7 +918,7 @@ def train_boltzmann_machine_pcd(model: CustomBoltzmannMachine, data_loader: torc
                 persistent_h = h_neg.detach()
 
             # --- Loss ---
-            pos_energy = model.energy(v_pos, h_pos).mean()
+            pos_energy = model.energy(v_pos.detach(), h_pos.detach()).mean()
             neg_energy = model.energy(v_neg, h_neg).mean()
             # If standard CD, we are minimizing the difference, same loss form:
             pcd_loss = pos_energy - neg_energy
@@ -945,15 +934,16 @@ def train_boltzmann_machine_pcd(model: CustomBoltzmannMachine, data_loader: torc
             pll_val = compute_pseudolikelihood(model, next(iter(data_loader))[0], num_samples=50)
             pll_values.append(pll_val)
 
-            # ADD RECONSTRUCTION EVAL:
-            if train_data is not None:
+            # Reconstruction eval every eval_every epochs (1-indexed)
+            do_recon = ((epoch + 1) % eval_every == 0) or (epoch + 1 == num_epochs)
+
+            if do_recon and train_data is not None:
                 train_metrics = evaluate_reconstruction(model, train_data, num_samples=50)
                 train_recon_mse_history.append(train_metrics['mse'])
                 train_recon_bce_history.append(train_metrics['bce'])
                 train_recon_acc_history.append(train_metrics['accuracy'])
             
-            if val_data is not None:
-                from torch.nn import functional as F  # Make sure this is imported
+            if do_recon and val_data is not None:
                 val_metrics = evaluate_reconstruction(model, val_data, num_samples=50)
                 val_mse = val_metrics['mse']
                 val_bce = val_metrics['bce']
@@ -961,17 +951,35 @@ def train_boltzmann_machine_pcd(model: CustomBoltzmannMachine, data_loader: torc
                 val_recon_bce_history.append(val_bce)
                 recon_mse_history.append(val_mse)
                 recon_acc_history.append(val_acc)
+
+            # --- Printing ---
+            base_msg = f"Epoch {epoch+1}/{num_epochs} | PCD: {avg_loss:.4f} | PLL: {pll_val:.4f}"
+            if do_recon:
+                recon_parts = []
                 if train_data is not None:
-                    print(f"Epoch {epoch+1}/{num_epochs} | PCD: {avg_loss:.4f} | PLL: {pll_val:.4f} | "
-                        f"Train Recon: MSE={train_metrics['mse']:.4f} BCE={train_metrics['bce']:.4f} Acc={train_metrics['accuracy']:.3f} | "
+                    recon_parts.append(
+                        f"Train Recon: MSE={train_metrics['mse']:.4f} BCE={train_metrics['bce']:.4f} Acc={train_metrics['accuracy']:.3f}")
+                if val_data is not None:
+                    recon_parts.append(
                         f"Val Recon: MSE={val_mse:.4f} BCE={val_bce:.4f} Acc={val_acc:.3f}")
+                if recon_parts:
+                    print(base_msg + " | " + " | ".join(recon_parts))
                 else:
-                    print(f"Epoch {epoch+1}/{num_epochs} | PCD: {avg_loss:.4f} | PLL: {pll_val:.4f} | "
-                        f"Val Recon: MSE={val_mse:.4f} Acc={val_acc:.3f}")
+                    print(base_msg)
+            else:
+                print(base_msg)
                
             
         if scheduler is not None:
-            scheduler.step(pll_val)  # Update LR based on PLL
+            # PLL is better when larger, so plateau scheduler should maximize this metric.
+            if isinstance(scheduler, ReduceLROnPlateau):
+                if getattr(scheduler, 'mode', None) == 'min':
+                    print("Warning: ReduceLROnPlateau is in mode='min' for PLL; stepping with -PLL to emulate maximize behavior.")
+                    scheduler.step(-pll_val)
+                else:
+                    scheduler.step(pll_val)
+            else:
+                scheduler.step(pll_val)
             current_lr = optimizer.param_groups[0]['lr']
             if epoch > 0 and current_lr != optimizer.param_groups[0]['lr']:
                 print(f"  → Learning rate adjusted to {current_lr:.6f}")
@@ -991,9 +999,115 @@ def train_boltzmann_machine_pcd(model: CustomBoltzmannMachine, data_loader: torc
 
 
 #SAMPLING -- this can maybe be improved? ned to test the vectorized version more and think. 
+def BM_SimAnn_Sampler(model: CustomBoltzmannMachine,
+                      start_temp: float,
+                      end_temp: float,
+                      max_iterations: int,
+                      num_samples: int = 1,
+                      track_best: bool = True,
+                      verbose: bool = True) -> torch.Tensor:
+    """
+    Simulated annealing sampler for CustomBoltzmannMachine.
+
+    Args:
+        model: Trained CustomBoltzmannMachine.
+        start_temp: Initial temperature (must be > 0).
+        end_temp: Final temperature (must be > 0 and <= start_temp).
+        max_iterations: Number of annealing iterations per sample.
+        num_samples: Number of visible samples to generate.
+        track_best: If True, return lowest-energy visible state seen in each chain.
+        verbose: If True, prints progress updates.
+
+    Returns:
+        Tensor of shape [num_samples, model.num_visible].
+    """
+    if start_temp <= 0:
+        raise ValueError("start_temp must be > 0.")
+    if end_temp <= 0:
+        raise ValueError("end_temp must be > 0.")
+    if end_temp > start_temp:
+        raise ValueError("end_temp must be <= start_temp.")
+    if max_iterations <= 0:
+        raise ValueError("max_iterations must be > 0.")
+    if num_samples <= 0:
+        raise ValueError("num_samples must be > 0.")
+
+    model.eval()
+    samples = []
+
+    if verbose:
+        print(
+            f"Running BM_SimAnn_Sampler for {num_samples} samples "
+            f"({max_iterations} iterations, start_temp={start_temp}, end_temp={end_temp})... ❄️"
+        )
+
+    # Log-spaced temperature schedule (high -> low)
+    temp_schedule = np.logspace(
+        np.log10(start_temp),
+        np.log10(end_temp),
+        max_iterations,
+        dtype=np.float64,
+    )
+
+    W_vv, W_hh, W_vh = model._get_masked_weights()
+    W_vv = W_vv.detach()
+    W_hh = W_hh.detach()
+    W_vh = W_vh.detach()
+
+    with torch.no_grad():
+        for n in range(num_samples):
+            v = torch.bernoulli(torch.full((1, model.num_visible), 0.5, device=device))
+            h = torch.bernoulli(torch.full((1, model.num_hidden), 0.5, device=device))
+
+            if track_best:
+                best_v = v.clone()
+                best_h = h.clone()
+                best_energy = model.energy(v, h).item()
+
+            for temperature in temp_schedule:
+                temperature = float(temperature)
+                # Visible updates
+                for i in torch.randperm(model.num_visible, device=device):
+                    i_idx = int(i.item())
+                    field_v = model._compute_local_field_v(v, h, i_idx, W_vv, W_vh)
+                    delta_E = -field_v * (1.0 - 2.0 * v[:, i_idx])
+                    accept_prob = torch.exp(-delta_E / temperature).clamp(0, 1)
+                    flip_mask = torch.bernoulli(accept_prob).bool()
+                    v[flip_mask, i_idx] = 1.0 - v[flip_mask, i_idx]
+
+                # Hidden updates
+                for j in torch.randperm(model.num_hidden, device=device):
+                    j_idx = int(j.item())
+                    field_h = model._compute_local_field_h(v, h, j_idx, W_hh, W_vh)
+                    delta_E = -field_h * (1.0 - 2.0 * h[:, j_idx])
+                    accept_prob = torch.exp(-delta_E / temperature).clamp(0, 1)
+                    flip_mask = torch.bernoulli(accept_prob).bool()
+                    h[flip_mask, j_idx] = 1.0 - h[flip_mask, j_idx]
+
+                if track_best:
+                    current_energy = model.energy(v, h).item()
+                    if current_energy < best_energy:
+                        best_energy = current_energy
+                        best_v = v.clone()
+                        best_h = h.clone()
+
+            if track_best:
+                samples.append(best_v.squeeze(0).clone())
+            else:
+                samples.append(v.squeeze(0).clone())
+
+            if verbose and (n + 1) % max(1, num_samples // 10) == 0:
+                print(f"  SA sample {n+1}/{num_samples}")
+
+    if verbose:
+        print("BM_SimAnn_Sampler complete.")
+
+    return torch.stack(samples, dim=0)
+
+
 def sample_from_bm(model: CustomBoltzmannMachine, num_samples: int, burn_in_steps: int,
                    method: str = 'gibbs', annealing_schedule: list[float] | None = None, fused_pairs=None,
-                   track_grad= False, gibbs_heur_vectorize= False) -> torch.Tensor:
+                   track_grad= False) -> torch.Tensor:
     """
     Samples visible unit configurations from the trained Boltzmann Machine.
     """
@@ -1008,7 +1122,7 @@ def sample_from_bm(model: CustomBoltzmannMachine, num_samples: int, burn_in_step
                 h = torch.bernoulli(torch.full((1, model.num_hidden), 0.5, device=device))
                 for step in range(burn_in_steps):
                     v, h = model.gibbs_sample_step_with_coloring(v, h, \
-                                            track_grad= track_grad, gibbs_heur_vectorize= gibbs_heur_vectorize)
+                                            track_grad= track_grad)
                     # h = enforce_fusion(h, fused_pairs, beta=10.0)
                 # if (step + 1) % (burn_in_steps // 5) == 0:  # check periodically
                 #         for (i, j) in fused_pairs:
@@ -1021,43 +1135,32 @@ def sample_from_bm(model: CustomBoltzmannMachine, num_samples: int, burn_in_step
         return torch.stack(samples, dim=0)
 
     elif method == 'simulated_annealing':
-        print(f"Running Simulated Annealing for {num_samples} samples, {burn_in_steps} steps each... ❄️")
         if annealing_schedule is None:
-            annealing_schedule = np.logspace(np.log10(10.0), np.log10(1), burn_in_steps)
+            return BM_SimAnn_Sampler(
+                model=model,
+                start_temp=10.0,
+                end_temp=1.0,
+                max_iterations=burn_in_steps,
+                num_samples=num_samples,
+                verbose=True,
+            )
 
         if len(annealing_schedule) != burn_in_steps:
             raise ValueError("Length of annealing_schedule must match burn_in_steps.")
+        if np.any(np.array(annealing_schedule) <= 0):
+            raise ValueError("annealing_schedule temperatures must all be > 0.")
 
-        W_vv, W_hh, W_vh = model._get_masked_weights()
-        W_vv = W_vv.detach()
-        W_hh = W_hh.detach()
-        W_vh = W_vh.detach()
+        start_temp = float(annealing_schedule[0])
+        end_temp = float(annealing_schedule[-1])
 
-        with torch.no_grad():
-            for n in range(num_samples):
-                v = torch.bernoulli(torch.full((1, model.num_visible), 0.5, device=device))
-                h = torch.bernoulli(torch.full((1, model.num_hidden), 0.5, device=device))
-                for step, temp in enumerate(annealing_schedule):
-                    # Visible units
-                    for i in torch.randperm(model.num_visible):
-                        field_v = model._compute_local_field_v(v, h, i, W_vv, W_vh)
-                        delta_E = field_v * (1.0 - 2.0 * v[:, i])
-                        accept_prob = torch.exp(-delta_E / temp).clamp(0, 1)
-                        flip_mask = torch.bernoulli(accept_prob).bool()
-                        v[flip_mask, i] = 1.0 - v[flip_mask, i]
-
-                    # Hidden units
-                    for j in torch.randperm(model.num_hidden):
-                        field_h = model._compute_local_field_h(v, h, j, W_hh, W_vh)
-                        delta_E = field_h * (1.0 - 2.0 * h[:, j])
-                        accept_prob = torch.exp(-delta_E / temp).clamp(0, 1)
-                        flip_mask = torch.bernoulli(accept_prob).bool()
-                        h[flip_mask, j] = 1.0 - h[flip_mask, j]
-                samples.append(v.squeeze(0).clone())
-                if (n + 1) % (max(1, num_samples // 10)) == 0:
-                    print(f"  SA sample {n+1}/{num_samples}")
-        print("Simulated Annealing complete.")
-        return torch.stack(samples, dim=0)
+        return BM_SimAnn_Sampler(
+            model=model,
+            start_temp=start_temp,
+            end_temp=end_temp,
+            max_iterations=burn_in_steps,
+            num_samples=num_samples,
+            verbose=True,
+        )
     else:
         raise ValueError("Method must be 'gibbs' or 'simulated_annealing'.")
 

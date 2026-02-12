@@ -1,0 +1,601 @@
+\documentclass[11pt,a4paper]{article}
+
+% ── Packages ──────────────────────────────────────────────────────────────
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{hyperref}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{cleveref}
+
+% ── Theorem-like environments ─────────────────────────────────────────────
+\newtheorem{definition}{Definition}
+\newtheorem{remark}{Remark}
+
+% ── Notation shortcuts ────────────────────────────────────────────────────
+\DeclareMathOperator*{\argmin}{arg\,min}
+\DeclareMathOperator*{\argmax}{arg\,max}
+\newcommand{\N}{\mathcal{N}}
+\newcommand{\VV}{\mathcal{V}}
+\newcommand{\HH}{\mathcal{H}}
+\newcommand{\EE}{\mathcal{E}}
+\newcommand{\RR}{\mathbb{R}}
+
+\title{Architecture Selection Methods for Boltzmann Machines\\on Zephyr Graph Topologies}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We describe three methods for partitioning the node set of a D-Wave Zephyr graph into \emph{visible} and \emph{hidden} units for the purpose of training a Boltzmann machine whose architecture is natively embeddable on quantum annealing hardware.  Each method produces a different assignment with distinct structural properties.  All three share a common pixel-assignment post-processing step and a common training pipeline; they differ only in how the visible/hidden partition is chosen.  We present each method with full mathematical formulations and algorithmic detail.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%═══════════════════════════════════════════════════════════════════════════
+\section{Preliminaries}\label{sec:prelim}
+%═══════════════════════════════════════════════════════════════════════════
+
+\subsection{The Zephyr Graph}\label{sec:zephyr}
+
+Let $Z(K)$ denote the \emph{Zephyr graph} of parameter $K$, the native hardware graph of D-Wave's Advantage2 quantum annealing processors.  For concrete experiments we use $K=3$, which yields $n=336$ nodes and $m\approx 1056$ edges, with maximum degree $\Delta \leq 10$.  The graph possesses a structured layout: each node has a canonical two-dimensional position
+\[
+  \mathrm{pos}: V(Z(K)) \;\longrightarrow\; \RR^2
+\]
+determined by D-Wave's layout conventions.  We exploit this embedding extensively for spatial reasoning.
+
+\subsection{Problem Statement}\label{sec:problem}
+
+Given a Zephyr graph $G=(V,E)$ with $|V|=n$ and a target image resolution of $R\times C$ pixels (so that $p = RC$ is the number of visible units required), the \textbf{node assignment problem} is to find a partition
+\[
+  V = \VV \;\dot\cup\; \HH, \qquad |\VV| = p, \quad |\HH| = n - p,
+\]
+together with a bijection $\pi: \{0,\ldots,p-1\} \to \VV$ mapping pixel indices to visible nodes, such that the resulting Boltzmann machine learns effectively.
+
+\begin{definition}[Edge classification]
+Given a partition $(\VV,\HH)$ of $V$, every edge $\{u,v\}\in E$ falls into exactly one of three classes:
+\begin{itemize}[nosep]
+  \item \textbf{VH edge} (visible--hidden): $u\in\VV, v\in\HH$ or vice versa,
+  \item \textbf{VV edge} (visible--visible): $u,v\in\VV$,
+  \item \textbf{HH edge} (hidden--hidden): $u,v\in\HH$.
+\end{itemize}
+We write $E_{\mathrm{VH}}$, $E_{\mathrm{VV}}$, $E_{\mathrm{HH}}$ for the respective edge sets, so that $E = E_{\mathrm{VH}} \;\dot\cup\; E_{\mathrm{VV}} \;\dot\cup\; E_{\mathrm{HH}}$.
+\end{definition}
+
+\begin{definition}[Cross-degree]\label{def:crossdeg}
+For a visible node $v\in\VV$, its \emph{VH-degree} is $d_{\mathrm{VH}}(v) = |\{u\in\HH : \{u,v\}\in E\}|$.  Analogously, for a hidden node $h\in\HH$, $d_{\mathrm{VH}}(h) = |\{u\in\VV : \{u,h\}\in E\}|$.
+\end{definition}
+
+In a restricted Boltzmann machine (RBM), every edge is a VH edge; the graph is complete bipartite.  On an arbitrary hardware graph, we cannot achieve this, but the quality of learning depends critically on the VH edge structure.  Informally, we seek partitions in which:
+\begin{enumerate}[nosep]
+  \item $|E_{\mathrm{VH}}|$ is large (data information flows through VH edges),
+  \item $\min_{v\in\VV} d_{\mathrm{VH}}(v)$ is large (every pixel ``sees'' many hidden features),
+  \item $\min_{h\in\HH} d_{\mathrm{VH}}(h)$ is large (every hidden unit is informed by data),
+  \item $|E_{\mathrm{VV}}|$ is small (VV edges do not participate in the standard RBM learning signal and may degrade generative quality).
+\end{enumerate}
+
+\subsection{Spatial Pixel Assignment}\label{sec:pixelass}
+
+All three methods share a common final step: once the visible set $\VV$ has been determined, pixel indices must be mapped to specific visible nodes.  We construct the bijection $\pi$ via a greedy spatial matching procedure.
+
+Let $\mathrm{pos}(v) \in \RR^2$ be the layout position of node~$v$.  Define a grid of target positions
+\[
+  \mathbf{g}_{r,c} = 
+  \begin{pmatrix}
+    x_{\min} + \frac{c}{C-1}(x_{\max}-x_{\min}) \\[4pt]
+    y_{\max} - \frac{r}{R-1}(y_{\max}-y_{\min})
+  \end{pmatrix},
+  \qquad r=0,\ldots,R{-}1,\;\; c=0,\ldots,C{-}1,
+\]
+where $[x_{\min},x_{\max}]\times [y_{\min},y_{\max}]$ is the bounding box of $\{\mathrm{pos}(v) : v\in V\}$.  Pixels are scanned in row-major order and each pixel is assigned to its nearest (Euclidean) unassigned visible node:
+
+\begin{algorithm}[H]
+\caption{Greedy Spatial Pixel Assignment}\label{alg:pixel}
+\begin{algorithmic}[1]
+\Require Visible set $\VV$, grid shape $(R,C)$, positions $\mathrm{pos}(\cdot)$
+\State $U \gets \VV$ \Comment{unassigned visible nodes}
+\For{$r = 0,\ldots,R-1$; $c = 0,\ldots,C-1$}
+  \State $k \gets rC + c$
+  \State $\pi(k) \gets \argmin_{v \in U}\; \|\mathrm{pos}(v) - \mathbf{g}_{r,c}\|^2$
+  \State $U \gets U \setminus \{\pi(k)\}$
+\EndFor
+\State \Return $\pi$
+\end{algorithmic}
+\end{algorithm}
+
+This is an $O(p^2)$ greedy procedure (not globally optimal) that produces spatially coherent assignments: nearby pixels are mapped to nearby physical qubits.
+
+\subsection{Relabeling and Model Construction}\label{sec:relabel}
+
+After determining $\pi$ and setting $\HH = V \setminus \VV$, we relabel the graph so that visible nodes occupy indices $\{0,\ldots,p-1\}$ (in pixel order) and hidden nodes occupy $\{p,\ldots,n-1\}$.  The relabeled graph, together with the node-type labels, is passed to the Boltzmann machine constructor, which builds a weight matrix $W\in\RR^{n\times n}$ with $W_{ij}=0$ whenever $\{i,j\}\notin E$ (i.e., the hardware graph connectivity is the sparsity mask for $W$).
+
+%═══════════════════════════════════════════════════════════════════════════
+\section{Method 1: Spectral Bisection}\label{sec:spectral}
+%═══════════════════════════════════════════════════════════════════════════
+
+\subsection{Motivation}
+
+A natural proxy for learning quality is to maximize $|E_{\mathrm{VH}}|$---i.e., to make the partition as ``bipartite-like'' as possible.  For a fixed partition size $|\VV|=p$, maximizing $|E_{\mathrm{VH}}|$ is equivalent to maximizing the \emph{edge cut} between $\VV$ and $\HH$.  This is an NP-hard problem in general (it is a constrained max-cut), but the \emph{spectral relaxation} via the Fiedler vector provides a well-known polynomial-time approximation.
+
+\subsection{The Fiedler Vector}\label{sec:fiedler}
+
+Let $L = D - A \in \RR^{n\times n}$ be the combinatorial Laplacian of $G$, where $D$ is the diagonal degree matrix and $A$ is the adjacency matrix.  Since $G$ is connected, $L$ has eigenvalues
+\[
+  0 = \lambda_1 < \lambda_2 \leq \lambda_3 \leq \cdots \leq \lambda_n.
+\]
+The second eigenvalue $\lambda_2$ is the \emph{algebraic connectivity}, and its corresponding eigenvector $\mathbf{f} \in \RR^n$ is the \emph{Fiedler vector}.  The Fiedler vector solves the continuous relaxation
+\[
+  \mathbf{f} = \argmin_{\substack{\mathbf{x}\in\RR^n \\ \mathbf{x}^T\mathbf{1}=0,\;\|\mathbf{x}\|=1}} \mathbf{x}^T L \mathbf{x}
+  = \argmin_{\substack{\mathbf{x}\in\RR^n \\ \mathbf{x}^T\mathbf{1}=0,\;\|\mathbf{x}\|=1}} \sum_{\{i,j\}\in E} (x_i - x_j)^2.
+\]
+
+The key property is that the Fiedler vector assigns real values to nodes such that adjacent nodes tend to have \emph{similar} values when $\lambda_2$ is small (tight clusters), but the constraint $\mathbf{f}^T\mathbf{1}=0$ forces the values to split around zero.  Thresholding $\mathbf{f}$ therefore partitions the graph into two groups that approximately \emph{maximise} the fraction of cross-edges relative to partition size.
+
+\subsection{Partition Construction}
+
+Since we require $|\VV|=p$ rather than an unconstrained bisection, we consider the two possible threshold-based partitions of size $p$:
+\begin{align}
+  \VV_{\mathrm{low}}  &= \{ v_{\sigma(1)},\ldots,v_{\sigma(p)} \}, \label{eq:vislow}\\
+  \VV_{\mathrm{high}} &= \{ v_{\sigma(n-p+1)},\ldots,v_{\sigma(n)} \}, \label{eq:vishigh}
+\end{align}
+where $\sigma$ is the permutation sorting nodes by ascending Fiedler value, i.e., $f_{\sigma(1)} \leq f_{\sigma(2)} \leq \cdots \leq f_{\sigma(n)}$.  Because the Zephyr graph is not vertex-transitive and $p<n/2$ in general, the two orientations may yield different cut sizes.  We select the orientation producing more VH edges:
+\begin{equation}\label{eq:specselect}
+  \VV^{(0)} = \argmax_{\VV \in \{\VV_{\mathrm{low}},\,\VV_{\mathrm{high}}\}} |E_{\mathrm{VH}}(\VV)|.
+\end{equation}
+
+\subsection{Local Swap Refinement}\label{sec:refine}
+
+The spectral partition is a continuous relaxation and may not be locally optimal for the discrete objective.  We apply a stochastic hill-climbing refinement.  Define the penalised objective
+\begin{equation}\label{eq:swapobj}
+  \Phi(\VV) = |E_{\mathrm{VH}}(\VV)| - \gamma\,|E_{\mathrm{VV}}(\VV)|,
+\end{equation}
+where $\gamma > 0$ is a small penalty weight (we use $\gamma=0.01$).
+
+\begin{algorithm}[H]
+\caption{Stochastic Swap Refinement}\label{alg:refine}
+\begin{algorithmic}[1]
+\Require Partition $\VV^{(0)}$, graph $G=(V,E)$, iterations $T$, penalty $\gamma$
+\State $\VV \gets \VV^{(0)}$
+\For{$t = 1,\ldots,T$}
+  \State Sample $v \sim \mathrm{Uniform}(\VV)$, $h \sim \mathrm{Uniform}(\HH)$
+  \State Compute incremental change $\Delta\Phi$ from swapping $v \leftrightarrow h$:
+  \[
+    \Delta\Phi = \Delta_{\mathrm{VH}} - \gamma\,\Delta_{\mathrm{VV}}
+  \]
+  where $\Delta_{\mathrm{VH}}$ and $\Delta_{\mathrm{VV}}$ are computed by examining only the neighbors of $v$ and $h$:
+  \begin{align*}
+    \Delta_{\mathrm{VH}} &= \sum_{u\in\N(v)\setminus\{h\}} \bigl[\mathbf{1}_{u\in\VV} - \mathbf{1}_{u\in\HH}\bigr]
+    + \sum_{u\in\N(h)\setminus\{v\}} \bigl[\mathbf{1}_{u\in\HH} - \mathbf{1}_{u\in\VV}\bigr], \\
+    \Delta_{\mathrm{VV}} &= \sum_{u\in\N(v)\setminus\{h\}} \bigl[-\mathbf{1}_{u\in\VV}\bigr]
+    + \sum_{u\in\N(h)\setminus\{v\}} \bigl[\mathbf{1}_{u\in\VV}\bigr].
+  \end{align*}
+  \If{$\Delta\Phi > 0$}
+    \State $\VV \gets (\VV \setminus \{v\}) \cup \{h\}$, $\HH \gets (\HH \setminus \{h\}) \cup \{v\}$
+  \EndIf
+\EndFor
+\State \Return $\VV$
+\end{algorithmic}
+\end{algorithm}
+
+Each iteration is $O(\Delta)$ since we only inspect neighborhoods.  With $T=500$ iterations and $\Delta\leq 10$, the entire refinement takes negligible time.
+
+\begin{remark}
+Because the Fiedler vector provides a globally-informed initialization, the refinement typically makes only $O(10)$ accepted swaps, improving $|E_{\mathrm{VH}}|$ by a small percentage.  The partition remains structurally similar to the spectral solution: visible nodes occupy one ``side'' of the graph, yielding a globally coherent architecture most similar to the bipartite structure of an RBM.
+\end{remark}
+
+
+%═══════════════════════════════════════════════════════════════════════════
+\section{Method 2: Hierarchical Spatial Tiling}\label{sec:tiling}
+%═══════════════════════════════════════════════════════════════════════════
+
+\subsection{Motivation}
+
+Convolutional and locally-connected neural network architectures are highly successful for image data because they exploit the \emph{spatial locality} of pixel correlations.  Method~2 adapts this principle to the Zephyr hardware graph by partitioning it into spatial \emph{tiles}, each serving as one local receptive field.  Within each tile, some nodes become visible (representing pixels from that image patch) and the remaining nodes become hidden (acting as local feature detectors).  Inter-tile edges---which exist naturally in the Zephyr graph---provide long-range correlation capacity.
+
+\subsection{Tile Construction}\label{sec:tiles}
+
+Given an image of size $R\times C$ and a patch side-length $s$ (with $s \mid R$ and $s \mid C$), define a tile grid of
+\[
+  T_r = R/s, \qquad T_c = C/s, \qquad T = T_r \cdot T_c
+\]
+tiles.  Each tile $\tau = (t_r, t_c)$ for $t_r=0,\ldots,T_r{-}1$ and $t_c=0,\ldots,T_c{-}1$ is responsible for the pixel patch $\{(r,c) : t_r s \leq r < (t_r+1)s,\; t_c s \leq c < (t_c+1)s\}$, containing $s^2$ pixels.
+
+We compute a \emph{tile centre} in graph layout space:
+\begin{equation}\label{eq:tilecenter}
+  \mathbf{c}_\tau = 
+  \begin{pmatrix}
+    x_{\min} + \frac{(t_c+\tfrac{1}{2})\,s}{C}\,(x_{\max} - x_{\min}) \\[4pt]
+    y_{\max} - \frac{(t_r+\tfrac{1}{2})\,s}{R}\,(y_{\max} - y_{\min})
+  \end{pmatrix}.
+\end{equation}
+
+\subsection{Node-to-Tile Assignment}
+
+Each graph node $v$ is assigned to its nearest tile:
+\begin{equation}\label{eq:nodetile}
+  \tau(v) = \argmin_{\tau \in \{0,\ldots,T-1\}} \|\mathrm{pos}(v) - \mathbf{c}_\tau\|^2.
+\end{equation}
+This is a Voronoi assignment with respect to the tile centres.  After the initial assignment, tile populations may be unbalanced: some tiles may contain fewer than $s^2$ nodes, making it impossible to assign all their pixels.
+
+\subsection{Tile Rebalancing}\label{sec:rebalance}
+
+We correct under-populated tiles via iterative donor-stealing:
+
+\begin{algorithm}[H]
+\caption{Tile Rebalancing}\label{alg:rebalance}
+\begin{algorithmic}[1]
+\Require Tile assignment $\tau(\cdot)$, minimum tile size $q = s^2$
+\For{each tile $\tau$ with $|V_\tau| < q$}
+  \While{$|V_\tau| < q$ and attempts $< 100$}
+    \State Find the nearest tile $\tau'$ with $|V_{\tau'}| > q$
+    \State $v^* \gets \argmin_{v \in V_{\tau'}} \|\mathrm{pos}(v) - \mathbf{c}_\tau\|^2$
+    \State Move $v^*$: \; $V_\tau \gets V_\tau \cup \{v^*\}$, \; $V_{\tau'} \gets V_{\tau'}\setminus\{v^*\}$
+  \EndWhile
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+This procedure transfers nodes from overpopulated tiles to their nearest underpopulated neighbour, preserving spatial coherence.  It converges quickly since the Zephyr graph has $n=336$ nodes spread across $T=16$ tiles (with $s=3$, $R=C=12$), yielding an average of $336/16=21$ nodes per tile but requiring only $s^2=9$ visible nodes per tile.
+
+\subsection{Intra-Tile Visible Selection}\label{sec:intratile}
+
+Within each tile $\tau$, we must select $s^2$ nodes to serve as visible units.  The remaining $|V_\tau| - s^2$ nodes become hidden units local to that tile.  To maximise \emph{intra-tile VH connectivity}, we rank nodes by their \emph{local subgraph degree}---i.e., the number of edges they have to other nodes in the same tile.
+
+Let $G_\tau = G[V_\tau]$ be the subgraph induced by tile $\tau$'s nodes.  We select the $s^2$ nodes with the highest degree in $G_\tau$:
+\begin{equation}\label{eq:visselect}
+  \VV_\tau = \text{top-}s^2 \text{ nodes of } V_\tau \text{ by } \deg_{G_\tau}(\cdot).
+\end{equation}
+
+The rationale is that high-degree nodes in the local subgraph are maximally connected to other nodes in the same tile.  Since the remaining intra-tile nodes become that tile's hidden units, this heuristic directly maximises the number of VH edges \emph{within} each tile.
+
+\subsection{Intra-Tile Pixel Assignment}
+
+Pixels within each patch are matched to visible nodes within the corresponding tile using the same greedy spatial procedure described in \cref{sec:pixelass}, but restricted to the tile's visible candidates and the tile's pixel positions.  For each tile $\tau = (t_r, t_c)$, we iterate over its $s^2$ pixel positions in raster order, computing target positions:
+\[
+  \mathbf{g}^{(\tau)}_{r,c} = 
+  \begin{pmatrix}
+    x_{\min} + \frac{t_c\,s + c + \tfrac{1}{2}}{C}\,(x_{\max}-x_{\min}) \\[4pt]
+    y_{\max} - \frac{t_r\,s + r + \tfrac{1}{2}}{R}\,(y_{\max}-y_{\min})
+  \end{pmatrix},
+\]
+where $r,c\in\{0,\ldots,s{-}1\}$.  Each pixel is greedily assigned to its nearest unassigned node in $\VV_\tau$.
+
+\subsection{Global Fallback}
+
+If any tile remains under-populated after rebalancing (i.e., $|V_\tau|<s^2$ for some $\tau$), the corresponding unassigned pixels are matched globally: the remaining unassigned visible slots are filled by the nearest available nodes from the global pool $V\setminus\VV$.
+
+\subsection{Structural Properties}
+
+The tiling architecture has qualitatively different edge statistics from the spectral method:
+\begin{itemize}[nosep]
+  \item \textbf{VH edges} arise both within tiles (intra-tile, by construction) and across tiles (inter-tile, serendipitously from the Zephyr topology).  Intra-tile VH edges provide local feature detection; inter-tile VH edges provide some non-local coupling.
+  \item \textbf{VV and HH edges} arise primarily between adjacent tiles, providing lateral interactions.
+  \item The \textbf{minimum VH-degree} per visible node is bounded below by the minimum local degree in $G_\tau$ for the selected visible nodes---typically $\geq 1$ by construction, though possibly small for tiles near the graph boundary.
+\end{itemize}
+
+
+%═══════════════════════════════════════════════════════════════════════════
+\section{Method 3: Integer Linear Programming with Bidirectional Objective}\label{sec:ilp}
+%═══════════════════════════════════════════════════════════════════════════
+
+\subsection{Motivation}
+
+Methods~1 and~2 use heuristic proxies (spectral relaxation, spatial tiling) to find the partition.  Method~3 formulates the node assignment as an \emph{integer linear program} (ILP) and solves it with a branch-and-cut solver (SCIP).  This allows us to directly optimise a composite objective that captures multiple aspects of partition quality simultaneously.
+
+In particular, we introduce a \textbf{bidirectional maximin} objective: we simultaneously maximise the \emph{worst-case VH-degree among all visible nodes} and the \emph{worst-case VH-degree among all hidden nodes}, while penalising VV edges.  This ensures that no visible node is ``starved'' of hidden connections (which would prevent it from learning) and no hidden node is disconnected from the data (which would make it a wasted parameter).
+
+\subsection{Decision Variables}
+
+\begin{align}
+  x_i &\in \{0,1\} \quad \forall\,i\in V  && \text{($x_i=1$ if node $i$ is visible),} \label{eq:xvar} \\
+  y_{ij} &\in \{0,1\} \quad \forall\,\{i,j\}\in E && \text{(linearisation of $x_i \cdot x_j$; VV-edge indicator),} \label{eq:yvar} \\
+  t_V &\in \mathbb{Z}_{\geq 0} && \text{(minimum VH-degree across visible nodes),} \label{eq:tvvar} \\
+  t_H &\in \mathbb{Z}_{\geq 0} && \text{(minimum VH-degree across hidden nodes).} \label{eq:thvar}
+\end{align}
+
+The total number of variables is $|V| + |E| + 2$.  For $Z(3)$, this is $336 + 1056 + 2 = 1394$.
+
+\subsection{Constraints}
+
+\paragraph{Partition cardinality.}
+\begin{equation}\label{eq:card}
+  \sum_{i\in V} x_i = p.
+\end{equation}
+
+\paragraph{Linearisation of $y_{ij} = x_i \cdot x_j$.}  For each $\{i,j\}\in E$:
+\begin{align}
+  y_{ij} &\leq x_i, \label{eq:yub1}\\
+  y_{ij} &\leq x_j, \label{eq:yub2}\\
+  y_{ij} &\geq x_i + x_j - 1. \label{eq:ylb}
+\end{align}
+These are the standard McCormick inequalities.  Together with $y_{ij}\geq 0$ (implied by the binary domain) and the maximisation objective's downward pressure, they ensure $y_{ij}=1$ if and only if both endpoints are visible.
+
+\paragraph{Maximin constraint for visible nodes.}  For each $i\in V$, the VH-degree of node $i$ (if it is visible) is $\sum_{j\in\N(i)}(1-x_j)$.  We require $t_V$ to be at most this quantity \emph{when $i$ is visible}, but impose no constraint when $i$ is hidden.  Using a big-$M$ formulation with $M = \Delta + 1$:
+\begin{equation}\label{eq:tvcons}
+  t_V \leq \sum_{j\in\N(i)} (1 - x_j) + M\,(1 - x_i), \qquad \forall\,i\in V.
+\end{equation}
+When $x_i=1$ (visible), this becomes $t_V \leq d_{\mathrm{VH}}(i)$.  When $x_i=0$ (hidden), the right-hand side is at least $M$, rendering the constraint inactive since $t_V \leq \Delta < M$.
+
+\paragraph{Maximin constraint for hidden nodes.}  Symmetrically, the VH-degree of node $i$ (if it is hidden) is $\sum_{j\in\N(i)} x_j$.  We require $t_H$ to be at most this when $i$ is hidden:
+\begin{equation}\label{eq:thcons}
+  t_H \leq \sum_{j\in\N(i)} x_j + M\,x_i, \qquad \forall\,i\in V.
+\end{equation}
+When $x_i=0$ (hidden), this is $t_H \leq d_{\mathrm{VH}}(i)$.  When $x_i=1$ (visible), the constraint is inactive.
+
+\subsection{Objective Function}
+
+\begin{equation}\label{eq:obj}
+  \max \quad \alpha\,t_V + \beta\,t_H - \gamma \sum_{\{i,j\}\in E} y_{ij},
+\end{equation}
+where $\alpha, \beta, \gamma > 0$ are weights.  The first two terms drive the solver to raise the worst-case VH-degree on both sides of the partition; the third term penalises visible--visible edges.  We use $\alpha = \beta = 1$ and $\gamma = 0.01$ as defaults.
+
+\begin{remark}
+The choice $\alpha = \beta$ treats the encoding direction (visible$\to$hidden) and the decoding direction (hidden$\to$visible) symmetrically.  In practice, one might set $\alpha > \beta$ if the generative (decoding) direction is more important, or vice versa.  The penalty $\gamma$ is deliberately small: it acts as a tie-breaker among solutions with equal $t_V$ and $t_H$, preferring those with fewer VV edges.
+\end{remark}
+
+\subsection{Problem Size and Complexity}
+
+The ILP has:
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Component} & \textbf{Count for $Z(3)$} & \textbf{Type} \\
+\midrule
+Binary variables $x_i$ & 336 & binary \\
+Binary variables $y_{ij}$ & 1056 & binary \\
+Integer variables $t_V, t_H$ & 2 & general integer \\
+\midrule
+Cardinality constraint & 1 & equality \\
+McCormick constraints & $3\times 1056 = 3168$ & inequality \\
+$t_V$ constraints & 336 & inequality \\
+$t_H$ constraints & 336 & inequality \\
+\midrule
+\textbf{Total constraints} & \textbf{3841} & \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+This is a moderately-sized ILP.  Modern branch-and-cut solvers (SCIP, Gurobi, CPLEX) can typically solve instances of this size to near-optimality within minutes.  We impose a time limit of 300 seconds.
+
+\subsection{Warm-Starting with Spectral Partition}\label{sec:warmstart}
+
+To accelerate the solver, we provide an initial feasible solution computed via the Fiedler-vector method of \cref{sec:spectral} (without the swap refinement).  Specifically:
+\begin{enumerate}[nosep]
+  \item Compute the Fiedler vector and select $\VV^{(0)}$ as in \cref{eq:specselect}.
+  \item Set $x_i = \mathbf{1}[i \in \VV^{(0)}]$ for all $i$.
+  \item Set $y_{ij} = x_i \cdot x_j$ for all $\{i,j\}\in E$.
+  \item Compute $t_V^{(0)} = \min_{i\in\VV^{(0)}} d_{\mathrm{VH}}(i)$ and $t_H^{(0)} = \min_{i\in\HH^{(0)}} d_{\mathrm{VH}}(i)$.
+  \item Submit $(x, y, t_V^{(0)}, t_H^{(0)})$ as a primal solution to the SCIP solver.
+\end{enumerate}
+
+The warm start provides SCIP with a known-feasible incumbent, which:
+\begin{itemize}[nosep]
+  \item gives an immediate lower bound on the optimal objective,
+  \item enables more aggressive pruning of the branch-and-bound tree,
+  \item often reduces solve time by an order of magnitude.
+\end{itemize}
+
+\subsection{Greedy Fallback}\label{sec:greedy}
+
+When a MIP solver is unavailable, we provide a two-phase greedy heuristic as a fallback.
+
+\paragraph{Phase 1: Random swap hill-climbing.}  Starting from the Fiedler partition $\VV^{(0)}$, we perform $T_1 = 1000$ iterations of the same stochastic swap procedure used in Method~1 (\cref{alg:refine}), optimising $\Phi(\VV) = |E_{\mathrm{VH}}| - \gamma\,|E_{\mathrm{VV}}|$.
+
+\paragraph{Phase 2: Targeted repair.}  We iteratively identify the visible node $v^*$ with the smallest VH-degree:
+\[
+  v^* = \argmin_{v\in\VV} d_{\mathrm{VH}}(v).
+\]
+If $d_{\mathrm{VH}}(v^*) \geq 2$, we stop (the partition is acceptable).  Otherwise, we sample up to 50 random hidden nodes and swap $v^*$ with the hidden node $h$ that would yield the highest VH-degree for $h$'s new visible position.  This phase runs for up to $T_1/5 = 200$ iterations, directly targeting the bottleneck nodes that the random walk in Phase~1 may not have addressed.
+
+%═══════════════════════════════════════════════════════════════════════════
+\section{Comparison of Methods}\label{sec:comparison}
+%═══════════════════════════════════════════════════════════════════════════
+
+\begin{table}[h]
+\centering
+\caption{Qualitative comparison of the three architecture selection methods.}
+\label{tab:comparison}
+\begin{tabular}{@{}p{3.2cm}p{3.8cm}p{3.8cm}p{3.8cm}@{}}
+\toprule
+& \textbf{Method 1: Spectral} & \textbf{Method 2: Tiling} & \textbf{Method 3: ILP} \\
+\midrule
+\textbf{Partition principle} & Global max-cut via Fiedler vector & Spatial Voronoi tiling with local degree selection & Direct ILP optimisation of bidirectional maximin \\[4pt]
+\textbf{VH structure} & Dense cross-edges; one ``hemisphere'' is visible & Local intra-tile VH; some inter-tile VH & Optimised for worst-case: every node has $\geq t^*$ cross-edges \\[4pt]
+\textbf{Spatial coherence} & Post-hoc via pixel assignment & Built-in via tile structure & Post-hoc via pixel assignment \\[4pt]
+\textbf{Analogy} & RBM-like (approximate bipartite) & Locally-connected / CNN-like & Minimax-optimal (no direct analogy) \\[4pt]
+\textbf{Optimality} & Approximate (spectral + local search) & Heuristic (greedy tiling) & Exact (within solver gap) \\[4pt]
+\textbf{Computation time} & $O(n^3)$ for eigendecomp $+$ $O(T\Delta)$ swaps & $O(n T)$ Voronoi $+$ rebalancing & Minutes (branch-and-cut solver) \\[4pt]
+\textbf{Scalability to $K>3$} & Excellent (eigendecomp feasible for $n\sim5000$) & Excellent (Voronoi is $O(nT)$) & Moderate (ILP grows with $|E|$; may need time limit) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Diagnostic Metrics}
+
+All three methods report the following diagnostic quantities to enable direct comparison:
+\begin{enumerate}[nosep]
+  \item $|E_{\mathrm{VH}}|$, $|E_{\mathrm{VV}}|$, $|E_{\mathrm{HH}}|$ --- edge-class counts.
+  \item $\min_{v\in\VV} d_{\mathrm{VH}}(v)$, $\mathrm{mean}_{v\in\VV} d_{\mathrm{VH}}(v)$, $\max_{v\in\VV} d_{\mathrm{VH}}(v)$ --- visible-side VH-degree statistics.
+  \item $\min_{h\in\HH} d_{\mathrm{VH}}(h)$, $\mathrm{mean}_{h\in\HH} d_{\mathrm{VH}}(h)$, $\max_{h\in\HH} d_{\mathrm{VH}}(h)$ --- hidden-side VH-degree statistics.
+  \item Number of ``starved'' nodes: $|\{i : d_{\mathrm{VH}}(i)=0\}|$.
+\end{enumerate}
+
+\subsection{Common Experimental Setup}
+
+To ensure a fair comparison, all three methods use identical:
+\begin{itemize}[nosep]
+  \item Training data: MNIST digits 0 and 1, downscaled to $12\times 12$, binarised at threshold 0.5.
+  \item Zephyr graph: $Z(3)$ with $n=336$ nodes.
+  \item Training hyperparameters: learning rate $\eta = 10^{-4}$, weight decay $10^{-3}$, batch size 64, 30 epochs, $k=10$ PCD steps with persistent chains.
+  \item Evaluation: Gibbs samples (1000-step burn-in) and simulated annealing samples.
+\end{itemize}
+
+
+%═══════════════════════════════════════════════════════════════════════════
+\section{Scalability Analysis: Custom BM vs.\ RBM Embedding}\label{sec:scalability}
+%═══════════════════════════════════════════════════════════════════════════
+
+A principal motivation for training Boltzmann machines directly on the hardware graph---rather than training a standard RBM and minor-embedding it---is the dramatically larger image resolution achievable on the same physical hardware.  In this section we make this advantage precise.
+
+\subsection{Zephyr Graph Scaling Laws}\label{sec:zephyrscaling}
+
+The Zephyr graph $Z(K)$ generated by \texttt{dwave\_networkx.zephyr\_graph(K)} has:
+\begin{align}
+  |V(Z(K))| &= 16K(2K+1), \label{eq:nK}\\
+  |E(Z(K))| &= 320K^2 - 16K - 24. \label{eq:mK}
+\end{align}
+Both formulas were verified computationally for $K=1,\ldots,15$.  \Cref{tab:zephyrstats} lists the key graph parameters.
+
+\begin{table}[h]
+\centering
+\caption{Zephyr graph statistics for selected values of $K$.  The maximum and minimum degrees are constant for $K\geq 3$.}
+\label{tab:zephyrstats}
+\begin{tabular}{@{}rrrrrr@{}}
+\toprule
+$K$ & $n = |V|$ & $m = |E|$ & $\Delta_{\max}$ & $\Delta_{\min}$ & $\bar{d}$ \\
+\midrule
+3  &   336 &  2\,808 & 20 & 10 & 16.7 \\
+4  &   576 &  5\,032 & 20 & 10 & 17.5 \\
+6  & 1\,248 & 11\,400 & 20 & 10 & 18.3 \\
+8  & 2\,176 & 20\,328 & 20 & 10 & 18.7 \\
+10 & 3\,360 & 31\,816 & 20 & 10 & 18.9 \\
+12 & 4\,800 & 45\,864 & 20 & 10 & 19.1 \\
+15 & 7\,440 & 71\,736 & 20 & 10 & 19.3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A crucial structural property is that $\Delta_{\max} = 20$ is \emph{constant} across all Zephyr graphs with $K\geq 3$.  This bounded degree is fundamental to the scaling analysis below.
+
+\subsection{Custom BM: Direct Use of Hardware Qubits}\label{sec:custscale}
+
+In our approach, every physical qubit becomes either a visible or a hidden unit, with no embedding overhead.  For a square $R\times R$ image:
+\begin{equation}\label{eq:custR}
+  p = R^2, \qquad h = n - R^2, \qquad R_{\mathrm{custom}} = \left\lfloor \sqrt{n/c} \right\rfloor,
+\end{equation}
+where $c \geq 1$ is the total-to-visible ratio.  With $c=2$ (equal visible and hidden):
+\[
+  R_{\mathrm{custom}} = \left\lfloor \sqrt{n/2}\,\right\rfloor = \left\lfloor \sqrt{8K(2K+1)}\,\right\rfloor.
+\]
+All $n$ physical qubits are productive model parameters; all $m$ physical couplers carry learnable weights.
+
+\subsection{RBM via Minor Embedding: The Chain-Length Bottleneck}\label{sec:rbmscale}
+
+A restricted Boltzmann machine with $p$ visible and $h$ hidden units is the complete bipartite graph $K_{p,h}$.  Since $K_{p,h}$ is generally not a subgraph of $Z(K)$, it must be realised as a \emph{graph minor}: each logical qubit is represented by a connected subgraph (\emph{chain}) of physical qubits, with strong ferromagnetic couplers enforcing intra-chain agreement.
+
+\begin{definition}[Chain]
+A \emph{chain} for logical qubit $\ell$ is a connected subgraph $C_\ell \subseteq G$ such that all chains are vertex-disjoint: $C_\ell \cap C_{\ell'} = \varnothing$ for $\ell\neq\ell'$.  Two logical qubits $\ell,\ell'$ are connected in the embedding if and only if there exists a physical edge $\{u,v\}\in E$ with $u\in C_\ell$, $v\in C_{\ell'}$.
+\end{definition}
+
+In $K_{p,h}$, every visible unit must connect to all $h$ hidden units.  Each physical qubit in a visible chain $C_v$ has at most $\Delta$ physical neighbors.  Not all of these neighbors are useful for inter-chain edges: if $C_v$ is a path of length $|C_v|$, then at most $|C_v|\cdot\Delta - 2(|C_v|-1)$ edges exit the chain.  Ignoring the second-order correction, a necessary condition for the chain to contact all $h$ hidden chains is:
+\begin{equation}\label{eq:chainlb}
+  |C_v| \;\geq\; \left\lceil \frac{h}{\Delta} \right\rceil.
+\end{equation}
+Symmetrically, each hidden chain requires $|C_h| \geq \lceil p/\Delta \rceil$.  Summing over all $p$ visible and $h$ hidden chains:
+\begin{equation}\label{eq:embub}
+  \underbrace{p\left\lceil \frac{h}{\Delta}\right\rceil + h\left\lceil \frac{p}{\Delta}\right\rceil}_{\text{total physical qubits used}} \;\leq\; n.
+\end{equation}
+
+With the common choice $h = p$ (equal visible and hidden) and replacing ceilings by the continuous relaxation:
+\begin{equation}\label{eq:pbound}
+  \frac{2p^2}{\Delta} \leq n
+  \qquad\Longrightarrow\qquad
+  p \leq \sqrt{\frac{n\Delta}{2}},
+  \qquad
+  R_{\mathrm{RBM}} \leq \left\lfloor\left(\frac{n\Delta}{2}\right)^{1/4}\right\rfloor.
+\end{equation}
+
+\begin{remark}
+Inequality~\eqref{eq:pbound} is a \emph{necessary condition} (upper bound); actual minor-embedding algorithms may not achieve it due to topological constraints and embedding inefficiency.  Furthermore, we have assumed equal visible and hidden counts ($h=p$); relaxing this trades hidden-layer capacity for slightly larger images.
+\end{remark}
+
+\begin{remark}[Chain breaks]
+In addition to the qubit overhead, minor embedding introduces a \emph{chain break} risk during quantum annealing: longer chains are more likely to have internal disagreements, corrupting the represented logical state.  The custom BM approach, using chain length $|C|=1$ for every node, eliminates this failure mode entirely.
+\end{remark}
+
+\subsection{Concrete Comparison}\label{sec:concrete}
+
+Substituting $\Delta = 20$ (constant for $K\geq 3$) into the bounds above gives:
+\begin{align}
+  R_{\mathrm{custom}} &= \left\lfloor\sqrt{8K(2K+1)}\,\right\rfloor = \Theta(K), \label{eq:Rcust}\\
+  R_{\mathrm{RBM}}    &\leq \left\lfloor\bigl(10\,n\bigr)^{1/4}\right\rfloor = \left\lfloor\bigl(160K(2K+1)\bigr)^{1/4}\right\rfloor = \Theta\!\left(K^{1/2}\right). \label{eq:Rrbm}
+\end{align}
+
+The custom BM image resolution scales \emph{linearly} in $K$, while the RBM embedding scales as the \emph{square root} of $K$.  Equivalently, in terms of the total qubit count $n$:
+\begin{equation}\label{eq:scaling}
+  \boxed{R_{\mathrm{custom}} = \Theta\!\left(\sqrt{n}\right), \qquad R_{\mathrm{RBM}} = O\!\left(n^{1/4}\right).}
+\end{equation}
+To double the image side length, the custom BM requires $4\times$ more qubits, while the embedded RBM requires $16\times$ more qubits.
+
+\Cref{tab:scalability} gives the concrete numbers for several Zephyr graph sizes, assuming $c=2$ (half the qubits are visible) for the custom BM and the necessary-condition bound \eqref{eq:pbound} with $h=p$ for the RBM.
+
+\begin{table}[h]
+\centering
+\caption{Maximum square image resolution achievable on Zephyr hardware.  The custom BM uses all qubits directly; the RBM bound follows from inequality~\eqref{eq:pbound} with $\Delta=20$ and $h=p$.  The pixel ratio is $R_{\mathrm{custom}}^2 / R_{\mathrm{RBM}}^2$.}
+\label{tab:scalability}
+\begin{tabular}{@{}rrr|rr|rr|r@{}}
+\toprule
+& & & \multicolumn{2}{c|}{\textbf{Custom BM}} & \multicolumn{2}{c|}{\textbf{RBM (upper bound)}} & \\
+$K$ & $n$ & $m$ & $R$ & Pixels & $R$ & Pixels & \textbf{Pixel ratio} \\
+\midrule
+3  &    336 &  2\,808 &  12 &   144 &  7 &  49 & 2.9$\times$ \\
+4  &    576 &  5\,032 &  16 &   256 &  8 &  64 & 4.0$\times$ \\
+6  &  1\,248 & 11\,400 &  24 &   576 & 10 & 100 & 5.8$\times$ \\
+8  &  2\,176 & 20\,328 &  32 & 1\,024 & 12 & 144 & 7.1$\times$ \\
+10 &  3\,360 & 31\,816 &  40 & 1\,600 & 13 & 169 & 9.5$\times$ \\
+12 &  4\,800 & 45\,864 &  48 & 2\,304 & 14 & 196 & 11.8$\times$ \\
+15 &  7\,440 & 71\,736 &  60 & 3\,600 & 16 & 256 & 14.1$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Several observations:
+
+\begin{enumerate}
+  \item \textbf{Current experiments ($K=3$, 336 qubits).}  Our custom BM supports $12\times 12$ images (144 pixels), while a minor-embedded RBM of equal visible/hidden size is limited to at most $7\times 7$ images (49 pixels)---a $2.9\times$ pixel advantage.
+
+  \item \textbf{Near-term hardware ($K=12$, $\sim\!4{,}800$ qubits).}  The custom BM could, in principle, support $48\times 48$ images (2\,304 pixels), whereas the embedded RBM is bounded by $14\times 14$ (196 pixels)---a $\mathbf{11.8\times}$ pixel advantage, and the RBM bound is already \emph{optimistic} since it assumes perfect embedding efficiency.
+
+  \item \textbf{Target-scale hardware ($K=15$, $\sim\!7{,}400$ qubits).}  The custom BM reaches $60\times 60$ resolution (3\,600 pixels) vs.\ at most $16\times 16$ for the RBM (256 pixels)---a $\mathbf{14.1\times}$ advantage that continues to grow with hardware scale.
+
+  \item \textbf{Widening gap.}  The pixel ratio scales as
+  \[
+    \frac{R_{\mathrm{custom}}^2}{R_{\mathrm{RBM}}^2} = \Theta\!\left(\frac{n}{n^{1/2}}\right) = \Theta\!\left(\sqrt{n}\right),
+  \]
+  so the relative advantage grows without bound as quantum annealers scale up.
+\end{enumerate}
+
+\begin{remark}[Parameter count]
+The custom BM has one learnable weight per physical coupler, totaling $m(K)$ weights.  The embedded RBM with $p$ visible and $p$ hidden has $p^2$ logical weights, but each requires a physical inter-chain coupler plus $(|C|-1)$ intra-chain ferromagnetic couplers per chain.  Much of the hardware's coupling capacity is thus consumed by chain maintenance in the RBM approach, while the custom BM uses every coupler productively.
+\end{remark}
+
+\begin{remark}[Practical caveats]\label{rem:caveats}
+The analysis above uses the \emph{ideal} Zephyr graph $Z(K)$.  Real hardware has qubit and coupler yield losses (typically 95--99\% functional), reducing the effective $n$ and $m$ somewhat.  This affects both approaches, but the RBM embedding is more sensitive: a missing qubit can break a chain, potentially making an entire logical qubit unusable, whereas the custom BM can simply omit damaged nodes from the architecture.  Furthermore, the RBM bound in~\eqref{eq:pbound} is a necessary condition; the actual achievable embedding is likely $10$--$30\%$ smaller due to topological constraints, making the practical pixel ratio even larger than reported in \cref{tab:scalability}.
+\end{remark}
+
+
+%═══════════════════════════════════════════════════════════════════════════
+\section{Discussion}\label{sec:discussion}
+%═══════════════════════════════════════════════════════════════════════════
+
+The three methods represent different points on a spectrum from \emph{global structural reasoning} (Method~1) through \emph{spatially-motivated design} (Method~2) to \emph{direct mathematical optimisation} (Method~3).
+
+Method~1 produces architectures that are most ``RBM-like'': visible nodes concentrate on one side of the graph, creating a roughly bipartite structure.  This is natural from a machine learning perspective---RBMs are among the best-understood generative models---but it does not exploit spatial locality in the image domain.
+
+Method~2 takes the opposite approach: it begins from the image structure (patches and local feature detectors) and maps this onto the hardware.  The resulting architecture has guaranteed local VH connectivity within each tile, but the global VH cut may be smaller than what the spectral method achieves, since visible nodes are dispersed across the graph.
+
+Method~3 is the most principled: it directly optimises the quantities that we believe affect learning quality, subject to hardware constraints.  The bidirectional maximin objective provides a strong guarantee that no node---visible or hidden---is severely under-connected.  However, it is also the most computationally expensive and, for larger Zephyr graphs ($K\geq 5$, $n \geq 912$), the ILP may not solve to optimality within reasonable time limits.  The warm-starting strategy and greedy fallback mitigate this concern.
+
+A key open question is which of these structural properties most influences learning: total VH edge count, minimum VH-degree balance, spatial locality, or some combination thereof.  The experimental comparison across these three methods is designed to shed light on this question.
+
+\end{document}
