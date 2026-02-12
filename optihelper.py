@@ -22,75 +22,6 @@ import itertools
 from pyomo.environ import ConcreteModel, Var, Constraint, Objective, SolverFactory, NonNegativeIntegers, Binary, summation, value, RangeSet
 
 
-# Analysis HELPERS
-def analyze_zephyr_layout(G, K, save_to_csv=True):
-    """
-    Detailed analysis of Zephyr graph structure.
-    Returns DataFrame with node positions, degrees, and identifies edge nodes.
-    """
-    import pandas as pd
-    
-    # Get Zephyr layout positions
-    try:
-        pos = dnx.zephyr_layout(G)
-    except:
-        print("⚠️ Using spring layout fallback")
-        pos = nx.spring_layout(G, seed=42)
-    
-    # Collect node data
-    node_data = []
-    for node in G.nodes():
-        x, y = pos[node]
-        deg = G.degree(node)
-        
-        # Calculate distance from center
-        center_x = sum(p[0] for p in pos.values()) / len(pos)
-        center_y = sum(p[1] for p in pos.values()) / len(pos)
-        dist_from_center = np.sqrt((x - center_x)**2 + (y - center_y)**2)
-        
-        # Identify if it's an edge node 
-        is_edge = (deg < 8) or (dist_from_center > np.percentile([
-            np.sqrt((pos[n][0] - center_x)**2 + (pos[n][1] - center_y)**2) 
-            for n in G.nodes()
-        ], 80))
-        
-        node_data.append({
-            'node': node,
-            'x': x,
-            'y': y,
-            'degree': deg,
-            'dist_from_center': dist_from_center,
-            'is_edge': is_edge
-        })
-    
-    df = pd.DataFrame(node_data)
-    
-    # Sort by different criteria
-    print("\n Top 20 nodes by degree ")
-    print(df.nlargest(20, 'degree')[['node', 'degree', 'x', 'y', 'dist_from_center']])
-    
-    print("\n Bottom 20 nodes by degree (edge candidates) ")
-    print(df.nsmallest(20, 'degree')[['node', 'degree', 'x', 'y', 'dist_from_center']])
-    
-    print("\n 20 nodes farthest from center ")
-    print(df.nlargest(20, 'dist_from_center')[['node', 'degree', 'x', 'y', 'dist_from_center']])
-    
-    print("\nDegree distribution ")
-    print(df['degree'].value_counts().sort_index())
-    
-    print(f"\nEdge node statistics")
-    edge_nodes = df[df['is_edge']]
-    print(f"  Edge nodes identified: {len(edge_nodes)}")
-    print(f"  Avg degree (edge): {edge_nodes['degree'].mean():.2f}")
-    print(f"  Avg degree (center): {df[~df['is_edge']]['degree'].mean():.2f}")
-    
-    if save_to_csv:
-        filename = f"zephyr_k{K}_node_analysis.csv"
-        df.to_csv(filename, index=False)
-        print(f"\n Saved full analysis to {filename}")
-    
-    return df
-
 
 
 def visualize_node_assignment_on_zephyr(G, visible_nodes, hidden_nodes, title="Node Assignment"):
@@ -467,7 +398,7 @@ def apply_fusions_to_graph_clean(G_original, x_vals, z_vals):
 
 def postprocess_fuse_hidden(G_contracted, visible_nodes, hidden_nodes, H_target):
     """
-    Stage 2: Greedily fuse ONLY hidden nodes to reach target.
+    Greedily fuse ONLY hidden nodes to reach target.
     VISIBLE NODES ARE NEVER TOUCHED.
     """
     print(f"\n=== POST-PROCESSING: Fuse {len(hidden_nodes)} → {H_target} hidden nodes ===")
@@ -528,63 +459,6 @@ def postprocess_fuse_hidden(G_contracted, visible_nodes, hidden_nodes, H_target)
     
     return G_work, final_visible, final_hidden
 
-
-
-def visualize_contracted_graph(G_contracted, visible_nodes, hidden_nodes, 
-                               use_zephyr_layout=True):
-    """
-    Visualize the contracted graph showing visible vs hidden nodes.
-    """
-    # Create x_sol format for compatibility with analyze_maxcut
-    x_sol = {}
-    for node in G_contracted.nodes():
-        x_sol[node] = 1 if node in visible_nodes else 0
-    
-    # Count cross-edges (visible-hidden connections)
-    cross_edges = []
-    for u, v in G_contracted.edges():
-        if x_sol[u] != x_sol[v]:
-            cross_edges.append((u, v))
-    
-    print(f" Cross-edges (V-H): {len(cross_edges)} out of {G_contracted.number_of_edges()}")
-    print(f" Visible nodes: {len(visible_nodes)}")
-    print(f" Hidden nodes: {len(hidden_nodes)}")
-    
-    # Visualize
-    if use_zephyr_layout:
-        # Use spring layout since Zephyr layout won't work after contraction
-        pos = nx.spring_layout(G_contracted, seed=42, k=0.5)
-    else:
-        pos = nx.spring_layout(G_contracted, seed=42)
-    
-    node_colors = ['red' if node in visible_nodes else 'blue' 
-                   for node in G_contracted.nodes()]
-    
-    plt.figure(figsize=(12, 8))
-    nx.draw_networkx_nodes(G_contracted, pos, node_color=node_colors, 
-                          node_size=50, alpha=0.8)
-    nx.draw_networkx_edges(G_contracted, pos, edge_color='lightgray', 
-                          alpha=0.3, width=0.5)
-    nx.draw_networkx_edges(G_contracted, pos, edgelist=cross_edges, 
-                          edge_color='green', alpha=0.6, width=1.0)
-    
-    # Add legend
-    red_patch = plt.Line2D([0], [0], marker='o', color='w', 
-                           markerfacecolor='red', markersize=10, label='Visible')
-    blue_patch = plt.Line2D([0], [0], marker='o', color='w', 
-                            markerfacecolor='blue', markersize=10, label='Hidden')
-    green_line = plt.Line2D([0], [0], color='green', linewidth=2, 
-                            label='V-H edges')
-    plt.legend(handles=[red_patch, blue_patch, green_line], loc='upper right')
-    
-    plt.title(f"Contracted Graph: {len(visible_nodes)} Visible, "
-              f"{len(hidden_nodes)} Hidden\n"
-              f"{len(cross_edges)} cross-edges")
-    plt.axis('off')
-    plt.tight_layout()
-    plt.show()
-    
-    return x_sol
 
 
 # Relabel graph nodes to be consecutive: visible first (0 to V-1), then hidden (V to V+H-1)

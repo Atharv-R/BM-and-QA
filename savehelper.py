@@ -1,6 +1,8 @@
 import json
 import networkx as nx
 import numpy as np
+import os
+import torch
 
 # Saving Optimization results to json
 def save_optimization_results(filepath, sol):
@@ -118,3 +120,41 @@ def load_optimization_results(filepath):
     }
     
     return sol
+
+def save_trained_model(model, filepath, metadata=None):
+    """
+    Save trained BM model with optional metadata.
+    
+    Args:
+        model: Trained CustomBoltzmannMachine
+        filepath: Where to save (e.g., 'model_k3_epoch50.pth')
+        metadata: Optional dict with training info
+    """
+    # Collect model architecture info needed to reconstruct
+    save_dict = {
+        'state_dict': model.state_dict(),  # Trained weights
+        'architecture': {
+            'num_visible': model.num_visible,
+            'num_hidden': model.num_hidden,
+            'k_gibbs_positive': model.k_gibbs_positive,
+        },
+        'masks': {
+            'mask_vv': model.mask_vv.cpu(),
+            'mask_hh': model.mask_hh.cpu(),
+            'mask_vh': model.mask_vh.cpu(),
+        },
+        'graph': {
+            'nodes': list(model.bm_graph.graph.nodes()),
+            'edges': list(model.bm_graph.graph.edges()),
+            'visible_nodes': model.bm_graph.visible_nodes,
+            'hidden_nodes': model.bm_graph.hidden_nodes,
+        }
+    }
+    
+    # Add optional metadata (hyperparameters, training history, etc.)
+    if metadata is not None:
+        save_dict['metadata'] = metadata
+    
+    torch.save(save_dict, filepath)
+    print(f"✓ Model saved to {filepath}")
+    print(f"  File size: {os.path.getsize(filepath) / 1024:.1f} KB")
