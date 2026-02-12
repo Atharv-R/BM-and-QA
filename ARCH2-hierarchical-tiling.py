@@ -285,11 +285,11 @@ grid_shape = GRID_SHAPE  # (12, 12) from bolmaqua
 num_visible = grid_shape[0] * grid_shape[1]
 
 # Training hyperparameters (matching test-RBM-as-custom-BM.py)
-lr = 5e-5
+lr = 1e-3
 weight_decay = 0.0001
-batch_size = 64
-epochs = 100
-k_steps = 10
+batch_size = 128
+epochs = 50
+k_steps = 15
 persistent_chains = True
 
 # Sampling
