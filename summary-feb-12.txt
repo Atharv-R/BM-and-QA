@@ -2,7 +2,7 @@
 PROJECT SUMMARY — February 12, 2026
 BM-and-QA: Boltzmann Machines on Quantum Annealer Hardware Graphs
 ================================================================================
-
+ 
 1. RESEARCH GOAL
 ================================================================================
 
