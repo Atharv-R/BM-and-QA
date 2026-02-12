@@ -19,6 +19,7 @@ Falls back to a greedy refinement approach if pyscipopt is unavailable.
 
 #%% defs
 
+import os
 import time
 import torch
 import numpy as np
@@ -386,10 +387,10 @@ grid_shape = GRID_SHAPE  # (12, 12) from bolmaqua
 num_visible = grid_shape[0] * grid_shape[1]
 
 # Training hyperparameters (matching test-RBM-as-custom-BM.py)
-lr = 1e-4
-weight_decay = 0.0001
+lr = 5e-5
+weight_decay = 0.00001
 batch_size = 64
-epochs = 50
+epochs = 100
 k_steps = 10
 persistent_chains = True
 
@@ -406,9 +407,15 @@ ilp_beta  = 1.0    # weight for min VH-degree of hidden nodes
 ilp_gamma = 0.01   # penalty per VV edge
 ilp_time_limit = 300  # seconds (5 minutes; K=3 should solve much faster)
 
+# Build hyperparam tag for filenames
+hparam_tag = f"K{K}_lr{lr}_wd{weight_decay}_bs{batch_size}_ep{epochs}_k{k_steps}_a{ilp_alpha}_b{ilp_beta}_g{ilp_gamma}"
+data_dir = "data"
+os.makedirs(data_dir, exist_ok=True)
+
 print(f"Zephyr K={K}, grid_shape={grid_shape}, num_visible={num_visible}")
 print(f"ILP weights: alpha={ilp_alpha}, beta={ilp_beta}, gamma={ilp_gamma}")
 print(f"Training: lr={lr}, epochs={epochs}, k_steps={k_steps}, batch_size={batch_size}")
+print(f"Hparam tag: {hparam_tag}")
 
 #%% 2. Data Loading
 
@@ -509,6 +516,26 @@ training_history = train_boltzmann_machine_pcd(
     eval_every=5,
 )
 
+#%% 6a. Save model and training history
+
+model_path = os.path.join(data_dir, f"arch3_{ARCH_NAME}_{hparam_tag}_model.pt")
+torch.save({
+    'model_state_dict': model.state_dict(),
+    'training_history': training_history,
+    'arch_name': ARCH_NAME,
+    'arch_label': ARCH_LABEL,
+    'hyperparams': {
+        'K': K, 'grid_shape': grid_shape, 'lr': lr, 'weight_decay': weight_decay,
+        'batch_size': batch_size, 'epochs': epochs, 'k_steps': k_steps,
+        'ilp_alpha': ilp_alpha, 'ilp_beta': ilp_beta, 'ilp_gamma': ilp_gamma,
+        'ilp_time_limit': ilp_time_limit,
+        'num_visible': num_visible, 'num_hidden': num_hidden,
+    },
+    'graph_edges': list(G_relabeled.edges()),
+    'node_labels': node_labels,
+}, model_path)
+print(f"Saved model to {model_path}")
+
 #%% 6b. Plot training metrics
 
 if training_history is not None and 'pcd_loss' in training_history:
@@ -567,6 +594,7 @@ if training_history is not None and 'pcd_loss' in training_history:
     fig.suptitle(f"{ARCH_LABEL} ({method_str}) — Training Metrics (Hidden={num_hidden})")
     fig.tight_layout()
     fig.savefig(f"arch3_{ARCH_NAME}_training.png")
+    fig.savefig(os.path.join(data_dir, f"arch3_{ARCH_NAME}_{hparam_tag}_training.png"))
     print(f"Saved training plot to arch3_{ARCH_NAME}_training.png")
     plt.show()
 
@@ -584,6 +612,7 @@ for i, ax in enumerate(axes.flat):
     ax.axis('off')
 plt.tight_layout()
 plt.savefig(f"arch3_{ARCH_NAME}_samples_gibbs.png")
+plt.savefig(os.path.join(data_dir, f"arch3_{ARCH_NAME}_{hparam_tag}_samples_gibbs.png"))
 print(f"Saved Gibbs samples to arch3_{ARCH_NAME}_samples_gibbs.png")
 plt.show()
 
@@ -609,6 +638,7 @@ for i, ax in enumerate(axes_sa.flat):
     ax.axis('off')
 plt.tight_layout()
 plt.savefig(f"arch3_{ARCH_NAME}_samples_sa.png")
+plt.savefig(os.path.join(data_dir, f"arch3_{ARCH_NAME}_{hparam_tag}_samples_sa.png"))
 print(f"Saved SA samples to arch3_{ARCH_NAME}_samples_sa.png")
 plt.show()
 
