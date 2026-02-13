@@ -886,10 +886,12 @@ def train_boltzmann_machine_pcd(model: CustomBoltzmannMachine, data_loader: torc
             optimizer.zero_grad()
 
             # --- Positive Phase (mean-field approx) ---
-            v_pos = batch
-            h_pos = torch.full((current_batch_size, model.num_hidden), 0.5, device=device)
-            for _ in range(model.k_gibbs_positive):
-                v_pos, h_pos = model.mean_field_update(v_pos, h_pos, update_v=False, update_h=True)
+            # Use no_grad since outputs are detached anyway - no gradients needed through this path
+            with torch.no_grad():
+                v_pos = batch
+                h_pos = torch.full((current_batch_size, model.num_hidden), 0.5, device=device)
+                for _ in range(model.k_gibbs_positive):
+                    v_pos, h_pos = model.mean_field_update(v_pos, h_pos, update_v=False, update_h=True)
 
             # --- Negative Phase ---
             if persistent:
@@ -919,7 +921,7 @@ def train_boltzmann_machine_pcd(model: CustomBoltzmannMachine, data_loader: torc
 
             # --- Loss ---
             pos_energy = model.energy(v_pos.detach(), h_pos.detach()).mean()
-            neg_energy = model.energy(v_neg, h_neg).mean()
+            neg_energy = model.energy(v_neg.detach(), h_neg.detach()).mean()
             # If standard CD, we are minimizing the difference, same loss form:
             pcd_loss = pos_energy - neg_energy
 
@@ -968,7 +970,10 @@ def train_boltzmann_machine_pcd(model: CustomBoltzmannMachine, data_loader: torc
                     print(base_msg)
             else:
                 print(base_msg)
-               
+        
+        # Clear CUDA cache to prevent memory fragmentation
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
             
         if scheduler is not None:
             # PLL is better when larger, so plateau scheduler should maximize this metric.
