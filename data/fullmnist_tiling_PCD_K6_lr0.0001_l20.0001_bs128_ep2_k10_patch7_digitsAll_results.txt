@@ -1,0 +1,41 @@
+Full MNIST Test Results — ARCH2: Hierarchical Tiling
+============================================================
+Architecture: tiling
+Zephyr K=6, nodes=1248, edges=11400
+Grid shape: (28, 28), visible=784, hidden=464
+Digits: all
+Train samples: 60000, Test samples: 10000
+
+Hyperparameters:
+  architecture: tiling
+  K: 6
+  grid_shape: (28, 28)
+  lr: 0.0001
+  weight_decay: 0.0001
+  l2_reg: 0.0001
+  batch_size: 128
+  epochs: 2
+  k_steps: 10
+  persistent_chains: True
+  binarize_threshold: 0.5
+  digit_filter: None
+  num_visible: 784
+  num_hidden: 464
+  num_train_samples: 60000
+  num_test_samples: 10000
+  patch_size: 7
+
+Test Results:
+  Reconstruction MSE:  0.152772
+  Reconstruction BCE:  0.491897
+  Reconstruction Acc:  0.871990
+  PLL (500 samples):   -0.561306
+
+Architecture Stats:
+  VH edges: 3980
+  VV edges: 5636
+  HH edges: 1784
+
+Files:
+  Model: data/fullmnist_tiling_PCD_K6_lr0.0001_l20.0001_bs128_ep2_k10_patch7_digitsAll_model.pt
+  Hparam tag: PCD_K6_lr0.0001_l20.0001_bs128_ep2_k10_patch7
