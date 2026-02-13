@@ -375,271 +375,274 @@ def greedy_bidirectional_assignment(G, num_visible, gamma=0.01, max_iters=1000):
     return visible_set
 
 
-print("=" * 60)
-print(ARCH_LABEL)
-print(f"SCIP available: {HAS_SCIP}")
-print("=" * 60)
 
-#%% 1. Config
+if __name__ == '__main__':
+    print("=" * 60)
+    print(ARCH_LABEL)
+    print(f"SCIP available: {HAS_SCIP}")
+    print("=" * 60)
 
-K = 3  # Zephyr graph parameter
-grid_shape = GRID_SHAPE  # (12, 12) from bolmaqua
-num_visible = grid_shape[0] * grid_shape[1]
+    #%% 1. Config
 
-# Training hyperparameters (matching test-RBM-as-custom-BM.py)
-lr = 5e-5
-weight_decay = 0.00001
-batch_size = 64
-epochs = 100
-k_steps = 10
-persistent_chains = True
+    K = 3  # Zephyr graph parameter
+    grid_shape = GRID_SHAPE  # (12, 12) from bolmaqua
+    num_visible = grid_shape[0] * grid_shape[1]
 
-# Sampling
-num_samples = 9
-gibbs_burn_in = 1000
-sa_start_temp = 10.0
-sa_end_temp = 0.2
-sa_iterations = 16
+    # Training hyperparameters (matching test-RBM-as-custom-BM.py)
+    lr = 1e-3
+    weight_decay = 0.00001
+    batch_size = 64
+    epochs = 50
+    k_steps = 15
+    persistent_chains = True
 
-# Strategy-specific: ILP objective weights
-ilp_alpha = 1.0    # weight for min VH-degree of visible nodes
-ilp_beta  = 1.0    # weight for min VH-degree of hidden nodes
-ilp_gamma = 0.01   # penalty per VV edge
-ilp_time_limit = 300  # seconds (5 minutes; K=3 should solve much faster)
+    # Sampling
+    num_samples = 9
+    gibbs_burn_in = 1000
+    sa_start_temp = 10.0
+    sa_end_temp = 0.2
+    sa_iterations = 16
 
-# Build hyperparam tag for filenames
-hparam_tag = f"K{K}_lr{lr}_wd{weight_decay}_bs{batch_size}_ep{epochs}_k{k_steps}_a{ilp_alpha}_b{ilp_beta}_g{ilp_gamma}"
-data_dir = "data"
-os.makedirs(data_dir, exist_ok=True)
+    # Strategy-specific: ILP objective weights
+    ilp_alpha = 1.0    # weight for min VH-degree of visible nodes
+    ilp_beta  = 1.0    # weight for min VH-degree of hidden nodes
+    ilp_gamma = 0.01   # penalty per VV edge
+    ilp_time_limit = 300  # seconds (5 minutes; K=3 should solve much faster)
 
-print(f"Zephyr K={K}, grid_shape={grid_shape}, num_visible={num_visible}")
-print(f"ILP weights: alpha={ilp_alpha}, beta={ilp_beta}, gamma={ilp_gamma}")
-print(f"Training: lr={lr}, epochs={epochs}, k_steps={k_steps}, batch_size={batch_size}")
-print(f"Hparam tag: {hparam_tag}")
+    # Build hyperparam tag for filenames
+    train_method = "PCD" if persistent_chains else "CD"
+    hparam_tag = f"{train_method}_K{K}_lr{lr}_l2{weight_decay}_bs{batch_size}_ep{epochs}_k{k_steps}_a{ilp_alpha}_b{ilp_beta}_g{ilp_gamma}"
+    data_dir = "data"
+    os.makedirs(data_dir, exist_ok=True)
 
-#%% 2. Data Loading
+    print(f"Zephyr K={K}, grid_shape={grid_shape}, num_visible={num_visible}")
+    print(f"ILP weights: alpha={ilp_alpha}, beta={ilp_beta}, gamma={ilp_gamma}")
+    print(f"Training: lr={lr}, epochs={epochs}, k_steps={k_steps}, batch_size={batch_size}")
+    print(f"Hparam tag: {hparam_tag}")
 
-print("\nLoading MNIST data...")
-data = load_data(grid_shape)
-if data is None:
-    raise RuntimeError("Failed to load data")
+    #%% 2. Data Loading
 
-dataset = TensorDataset(data)
-loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
-print(f"Data samples: {len(data)}, visible units: {num_visible}")
+    print("\nLoading MNIST data...")
+    data = load_data(grid_shape)
+    if data is None:
+        raise RuntimeError("Failed to load data")
 
-#%% 3. Architecture Construction
+    dataset = TensorDataset(data)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
+    print(f"Data samples: {len(data)}, visible units: {num_visible}")
 
-print(f"\nGenerating Zephyr graph Z({K})...")
-t0 = time.time()
-G_zephyr = dnx.zephyr_graph(K)
-n_total = G_zephyr.number_of_nodes()
-n_edges = G_zephyr.number_of_edges()
-print(f"  Nodes: {n_total}, Edges: {n_edges}")
-print(f"  Degree: min={min(dict(G_zephyr.degree()).values())}, "
-      f"max={max(dict(G_zephyr.degree()).values())}")
+    #%% 3. Architecture Construction
 
-# Step 1: Compute spectral warm start
-print("\nStep 1: Computing spectral warm start...")
-warm_start = spectral_warm_start(G_zephyr, num_visible)
-ws_vh = sum(1 for u, v in G_zephyr.edges() if (u in warm_start) != (v in warm_start))
-print(f"  Warm start VH edges: {ws_vh}")
+    print(f"\nGenerating Zephyr graph Z({K})...")
+    t0 = time.time()
+    G_zephyr = dnx.zephyr_graph(K)
+    n_total = G_zephyr.number_of_nodes()
+    n_edges = G_zephyr.number_of_edges()
+    print(f"  Nodes: {n_total}, Edges: {n_edges}")
+    print(f"  Degree: min={min(dict(G_zephyr.degree()).values())}, "
+          f"max={max(dict(G_zephyr.degree()).values())}")
 
-# Step 2: Run ILP or greedy
-if HAS_SCIP:
-    print("\nStep 2: Solving ILP with SCIP...")
-    visible_set, ilp_stats = ilp_bidirectional_assignment(
-        G_zephyr, num_visible,
-        alpha=ilp_alpha, beta=ilp_beta, gamma=ilp_gamma,
-        time_limit=ilp_time_limit,
-        warm_start_set=warm_start,
-    )
-    if visible_set is None:
-        print("  ILP failed — falling back to greedy")
+    # Step 1: Compute spectral warm start
+    print("\nStep 1: Computing spectral warm start...")
+    warm_start = spectral_warm_start(G_zephyr, num_visible)
+    ws_vh = sum(1 for u, v in G_zephyr.edges() if (u in warm_start) != (v in warm_start))
+    print(f"  Warm start VH edges: {ws_vh}")
+
+    # Step 2: Run ILP or greedy
+    if HAS_SCIP:
+        print("\nStep 2: Solving ILP with SCIP...")
+        visible_set, ilp_stats = ilp_bidirectional_assignment(
+            G_zephyr, num_visible,
+            alpha=ilp_alpha, beta=ilp_beta, gamma=ilp_gamma,
+            time_limit=ilp_time_limit,
+            warm_start_set=warm_start,
+        )
+        if visible_set is None:
+            print("  ILP failed — falling back to greedy")
+            visible_set = greedy_bidirectional_assignment(
+                G_zephyr, num_visible, gamma=ilp_gamma)
+    else:
+        print("\nStep 2: Greedy bidirectional optimization (SCIP not available)...")
         visible_set = greedy_bidirectional_assignment(
             G_zephyr, num_visible, gamma=ilp_gamma)
-else:
-    print("\nStep 2: Greedy bidirectional optimization (SCIP not available)...")
-    visible_set = greedy_bidirectional_assignment(
-        G_zephyr, num_visible, gamma=ilp_gamma)
 
-# Step 3: Assign pixel positions spatially
-print("\nStep 3: Spatial pixel assignment...")
-visible_in_pixel_order = assign_pixel_order_spatial(G_zephyr, visible_set, grid_shape)
-hidden_nodes = [n for n in sorted(G_zephyr.nodes()) if n not in visible_set]
-num_hidden = len(hidden_nodes)
+    # Step 3: Assign pixel positions spatially
+    print("\nStep 3: Spatial pixel assignment...")
+    visible_in_pixel_order = assign_pixel_order_spatial(G_zephyr, visible_set, grid_shape)
+    hidden_nodes = [n for n in sorted(G_zephyr.nodes()) if n not in visible_set]
+    num_hidden = len(hidden_nodes)
 
-# Step 4: Relabel graph
-print(f"\nStep 4: Relabeling graph (visible=0..{num_visible-1}, "
-      f"hidden={num_visible}..{num_visible+num_hidden-1})...")
-G_relabeled, mapping = relabel_visible_first(G_zephyr, visible_in_pixel_order)
+    # Step 4: Relabel graph
+    print(f"\nStep 4: Relabeling graph (visible=0..{num_visible-1}, "
+          f"hidden={num_visible}..{num_visible+num_hidden-1})...")
+    G_relabeled, mapping = relabel_visible_first(G_zephyr, visible_in_pixel_order)
 
-# Build node labels
-node_labels = {}
-for i in range(num_visible):
-    node_labels[i] = 'visible'
-for i in range(num_visible, num_visible + num_hidden):
-    node_labels[i] = 'hidden'
+    # Build node labels
+    node_labels = {}
+    for i in range(num_visible):
+        node_labels[i] = 'visible'
+    for i in range(num_visible, num_visible + num_hidden):
+        node_labels[i] = 'hidden'
 
-t_arch = time.time() - t0
-print(f"Architecture construction time: {t_arch:.1f}s")
+    t_arch = time.time() - t0
+    print(f"Architecture construction time: {t_arch:.1f}s")
 
-#%% 4. Architecture Analysis
+    #%% 4. Architecture Analysis
 
-visible_relabeled = list(range(num_visible))
-hidden_relabeled = list(range(num_visible, num_visible + num_hidden))
-stats = analyze_architecture(G_relabeled, visible_relabeled, hidden_relabeled, ARCH_LABEL)
+    visible_relabeled = list(range(num_visible))
+    hidden_relabeled = list(range(num_visible, num_visible + num_hidden))
+    stats = analyze_architecture(G_relabeled, visible_relabeled, hidden_relabeled, ARCH_LABEL)
 
-#%% 5. Model Initialization
+    #%% 5. Model Initialization
 
-print("Initializing CustomBoltzmannMachine...")
-model = graph_to_bm(G_relabeled, node_labels)
-model.to(device)
-total_params = sum(p.numel() for p in model.parameters())
-print(f"Model on {device}, total parameters: {total_params:,}")
+    print("Initializing CustomBoltzmannMachine...")
+    model = graph_to_bm(G_relabeled, node_labels)
+    model.to(device)
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Model on {device}, total parameters: {total_params:,}")
 
-#%% 6. Training (PCD)
+    #%% 6. Training (PCD)
 
-print(f"\nStarting PCD Training (lr={lr}, epochs={epochs}, k={k_steps})...")
-optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    print(f"\nStarting PCD Training (lr={lr}, epochs={epochs}, k={k_steps})...")
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
-training_history = train_boltzmann_machine_pcd(
-    model,
-    loader,
-    optimizer,
-    num_epochs=epochs,
-    k_steps=k_steps,
-    batch_size=batch_size,
-    step_size=lr,
-    persistent=persistent_chains,
-    train_data=data,
-    eval_every=5,
-)
+    training_history = train_boltzmann_machine_pcd(
+        model,
+        loader,
+        optimizer,
+        num_epochs=epochs,
+        k_steps=k_steps,
+        batch_size=batch_size,
+        step_size=lr,
+        persistent=persistent_chains,
+        train_data=data,
+        eval_every=5,
+    )
 
-#%% 6a. Save model and training history
+    #%% 6a. Save model and training history
 
-model_path = os.path.join(data_dir, f"arch3_{ARCH_NAME}_{hparam_tag}_model.pt")
-torch.save({
-    'model_state_dict': model.state_dict(),
-    'training_history': training_history,
-    'arch_name': ARCH_NAME,
-    'arch_label': ARCH_LABEL,
-    'hyperparams': {
-        'K': K, 'grid_shape': grid_shape, 'lr': lr, 'weight_decay': weight_decay,
-        'batch_size': batch_size, 'epochs': epochs, 'k_steps': k_steps,
-        'ilp_alpha': ilp_alpha, 'ilp_beta': ilp_beta, 'ilp_gamma': ilp_gamma,
-        'ilp_time_limit': ilp_time_limit,
-        'num_visible': num_visible, 'num_hidden': num_hidden,
-    },
-    'graph_edges': list(G_relabeled.edges()),
-    'node_labels': node_labels,
-}, model_path)
-print(f"Saved model to {model_path}")
+    model_path = os.path.join(data_dir, f"arch3_{ARCH_NAME}_{hparam_tag}_model.pt")
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'training_history': training_history,
+        'arch_name': ARCH_NAME,
+        'arch_label': ARCH_LABEL,
+        'hyperparams': {
+            'K': K, 'grid_shape': grid_shape, 'lr': lr, 'weight_decay': weight_decay, 'l2_reg': weight_decay,
+            'batch_size': batch_size, 'epochs': epochs, 'k_steps': k_steps,
+            'ilp_alpha': ilp_alpha, 'ilp_beta': ilp_beta, 'ilp_gamma': ilp_gamma,
+            'ilp_time_limit': ilp_time_limit,
+            'num_visible': num_visible, 'num_hidden': num_hidden,
+        },
+        'graph_edges': list(G_relabeled.edges()),
+        'node_labels': node_labels,
+    }, model_path)
+    print(f"Saved model to {model_path}")
 
-#%% 6b. Plot training metrics
+    #%% 6b. Plot training metrics
 
-if training_history is not None and 'pcd_loss' in training_history:
-    epochs_range = range(1, len(training_history['pcd_loss']) + 1)
-    has_train_recon = len(training_history.get('train_recon_mse', [])) > 0
-    num_plots = 2 if has_train_recon else 1
+    if training_history is not None and 'pcd_loss' in training_history:
+        epochs_range = range(1, len(training_history['pcd_loss']) + 1)
+        has_train_recon = len(training_history.get('train_recon_mse', [])) > 0
+        num_plots = 2 if has_train_recon else 1
 
-    fig, axes = plt.subplots(1, num_plots, figsize=(7 * num_plots, 5))
-    if num_plots == 1:
-        axes = [axes]
+        fig, axes = plt.subplots(1, num_plots, figsize=(7 * num_plots, 5))
+        if num_plots == 1:
+            axes = [axes]
 
-    # Panel 1: PCD Loss & PLL
-    ax1 = axes[0]
-    ax1.set_xlabel("Epoch")
-    ax1.set_ylabel("PCD Loss", color='tab:blue')
-    ax1.plot(epochs_range, training_history['pcd_loss'],
-             marker='o', linewidth=2, color='tab:blue', label='PCD Loss')
-    ax1.tick_params(axis='y', labelcolor='tab:blue')
+        # Panel 1: PCD Loss & PLL
+        ax1 = axes[0]
+        ax1.set_xlabel("Epoch")
+        ax1.set_ylabel("PCD Loss", color='tab:blue')
+        ax1.plot(epochs_range, training_history['pcd_loss'],
+                 marker='o', linewidth=2, color='tab:blue', label='PCD Loss')
+        ax1.tick_params(axis='y', labelcolor='tab:blue')
 
-    if 'pll' in training_history and len(training_history['pll']) > 0:
-        ax1b = ax1.twinx()
-        ax1b.set_ylabel("Pseudo Log-Likelihood", color='tab:red')
-        ax1b.plot(epochs_range, training_history['pll'],
-                  marker='s', linewidth=2, color='tab:red', label='PLL')
-        ax1b.tick_params(axis='y', labelcolor='tab:red')
-    ax1.set_title("PCD Loss & PLL")
-    ax1.grid(True, alpha=0.3)
+        if 'pll' in training_history and len(training_history['pll']) > 0:
+            ax1b = ax1.twinx()
+            ax1b.set_ylabel("Pseudo Log-Likelihood", color='tab:red')
+            ax1b.plot(epochs_range, training_history['pll'],
+                      marker='s', linewidth=2, color='tab:red', label='PLL')
+            ax1b.tick_params(axis='y', labelcolor='tab:red')
+        ax1.set_title("PCD Loss & PLL")
+        ax1.grid(True, alpha=0.3)
 
-    # Panel 2: Reconstruction metrics
-    if has_train_recon:
-        ax2 = axes[1]
-        eval_every = 5
-        n_recon = len(training_history['train_recon_mse'])
-        recon_epochs = [e for e in range(1, len(training_history['pcd_loss']) + 1)
-                        if e % eval_every == 0 or e == len(training_history['pcd_loss'])]
-        recon_epochs = recon_epochs[:n_recon]
+        # Panel 2: Reconstruction metrics
+        if has_train_recon:
+            ax2 = axes[1]
+            eval_every = 5
+            n_recon = len(training_history['train_recon_mse'])
+            recon_epochs = [e for e in range(1, len(training_history['pcd_loss']) + 1)
+                            if e % eval_every == 0 or e == len(training_history['pcd_loss'])]
+            recon_epochs = recon_epochs[:n_recon]
 
-        ax2.plot(recon_epochs, training_history['train_recon_mse'],
-                 marker='o', linewidth=2, color='tab:green', label='MSE')
-        ax2.plot(recon_epochs, training_history['train_recon_bce'],
-                 marker='^', linewidth=2, color='tab:orange', label='BCE')
-        ax2.set_xlabel("Epoch")
-        ax2.set_ylabel("Reconstruction Loss")
-        ax2.set_title("Train Reconstruction Metrics")
-        ax2.grid(True, alpha=0.3)
-        ax2.legend(loc='upper left')
+            ax2.plot(recon_epochs, training_history['train_recon_mse'],
+                     marker='o', linewidth=2, color='tab:green', label='MSE')
+            ax2.plot(recon_epochs, training_history['train_recon_bce'],
+                     marker='^', linewidth=2, color='tab:orange', label='BCE')
+            ax2.set_xlabel("Epoch")
+            ax2.set_ylabel("Reconstruction Loss")
+            ax2.set_title("Train Reconstruction Metrics")
+            ax2.grid(True, alpha=0.3)
+            ax2.legend(loc='upper left')
 
-        ax2b = ax2.twinx()
-        ax2b.plot(recon_epochs, training_history['train_recon_acc'],
-                  marker='D', linewidth=2, color='tab:purple', label='Accuracy')
-        ax2b.set_ylabel("Accuracy", color='tab:purple')
-        ax2b.tick_params(axis='y', labelcolor='tab:purple')
-        ax2b.legend(loc='upper right')
+            ax2b = ax2.twinx()
+            ax2b.plot(recon_epochs, training_history['train_recon_acc'],
+                      marker='D', linewidth=2, color='tab:purple', label='Accuracy')
+            ax2b.set_ylabel("Accuracy", color='tab:purple')
+            ax2b.tick_params(axis='y', labelcolor='tab:purple')
+            ax2b.legend(loc='upper right')
 
-    method_str = "ILP" if HAS_SCIP else "Greedy"
-    fig.suptitle(f"{ARCH_LABEL} ({method_str}) — Training Metrics (Hidden={num_hidden})")
-    fig.tight_layout()
-    fig.savefig(f"arch3_{ARCH_NAME}_training.png")
-    fig.savefig(os.path.join(data_dir, f"arch3_{ARCH_NAME}_{hparam_tag}_training.png"))
-    print(f"Saved training plot to arch3_{ARCH_NAME}_training.png")
+        method_str = "ILP" if HAS_SCIP else "Greedy"
+        fig.suptitle(f"{ARCH_LABEL} ({method_str}) — Training Metrics (Hidden={num_hidden})")
+        fig.tight_layout()
+        fig.savefig(f"arch3_{ARCH_NAME}_training.png")
+        fig.savefig(os.path.join(data_dir, f"arch3_{ARCH_NAME}_{hparam_tag}_training.png"))
+        print(f"Saved training plot to arch3_{ARCH_NAME}_training.png")
+        plt.show()
+
+    #%% 7. Sampling & Visualization (Gibbs)
+
+    print(f"\nGenerating {num_samples} Gibbs samples (burn-in={gibbs_burn_in})...")
+    samples = sample_from_bm(model, num_samples=num_samples, burn_in_steps=gibbs_burn_in, method='gibbs')
+    samples_np = samples.cpu().detach().numpy()
+
+    fig, axes = plt.subplots(3, 3, figsize=(8, 8))
+    fig.suptitle(f"{ARCH_LABEL} — Gibbs Samples (Epochs={epochs}, Hidden={num_hidden})")
+    for i, ax in enumerate(axes.flat):
+        if i < len(samples_np):
+            ax.imshow(samples_np[i].reshape(grid_shape), cmap='gray', vmin=0, vmax=1)
+        ax.axis('off')
+    plt.tight_layout()
+    plt.savefig(f"arch3_{ARCH_NAME}_samples_gibbs.png")
+    plt.savefig(os.path.join(data_dir, f"arch3_{ARCH_NAME}_{hparam_tag}_samples_gibbs.png"))
+    print(f"Saved Gibbs samples to arch3_{ARCH_NAME}_samples_gibbs.png")
     plt.show()
 
-#%% 7. Sampling & Visualization (Gibbs)
+    #%% 8. Sampling & Visualization (Simulated Annealing)
 
-print(f"\nGenerating {num_samples} Gibbs samples (burn-in={gibbs_burn_in})...")
-samples = sample_from_bm(model, num_samples=num_samples, burn_in_steps=gibbs_burn_in, method='gibbs')
-samples_np = samples.cpu().detach().numpy()
+    print(f"\nGenerating {num_samples} SA samples...")
+    sa_samples = BM_SimAnn_Sampler(
+        model=model,
+        start_temp=sa_start_temp,
+        end_temp=sa_end_temp,
+        max_iterations=sa_iterations,
+        num_samples=num_samples,
+        track_best=True,
+        verbose=True,
+    )
+    sa_np = sa_samples.cpu().detach().numpy()
 
-fig, axes = plt.subplots(3, 3, figsize=(8, 8))
-fig.suptitle(f"{ARCH_LABEL} — Gibbs Samples (Epochs={epochs}, Hidden={num_hidden})")
-for i, ax in enumerate(axes.flat):
-    if i < len(samples_np):
-        ax.imshow(samples_np[i].reshape(grid_shape), cmap='gray', vmin=0, vmax=1)
-    ax.axis('off')
-plt.tight_layout()
-plt.savefig(f"arch3_{ARCH_NAME}_samples_gibbs.png")
-plt.savefig(os.path.join(data_dir, f"arch3_{ARCH_NAME}_{hparam_tag}_samples_gibbs.png"))
-print(f"Saved Gibbs samples to arch3_{ARCH_NAME}_samples_gibbs.png")
-plt.show()
+    fig_sa, axes_sa = plt.subplots(3, 3, figsize=(8, 8))
+    fig_sa.suptitle(f"{ARCH_LABEL} — SA Samples (Epochs={epochs}, Hidden={num_hidden})")
+    for i, ax in enumerate(axes_sa.flat):
+        if i < len(sa_np):
+            ax.imshow(sa_np[i].reshape(grid_shape), cmap='gray', vmin=0, vmax=1)
+        ax.axis('off')
+    plt.tight_layout()
+    plt.savefig(f"arch3_{ARCH_NAME}_samples_sa.png")
+    plt.savefig(os.path.join(data_dir, f"arch3_{ARCH_NAME}_{hparam_tag}_samples_sa.png"))
+    print(f"Saved SA samples to arch3_{ARCH_NAME}_samples_sa.png")
+    plt.show()
 
-#%% 8. Sampling & Visualization (Simulated Annealing)
-
-print(f"\nGenerating {num_samples} SA samples...")
-sa_samples = BM_SimAnn_Sampler(
-    model=model,
-    start_temp=sa_start_temp,
-    end_temp=sa_end_temp,
-    max_iterations=sa_iterations,
-    num_samples=num_samples,
-    track_best=True,
-    verbose=True,
-)
-sa_np = sa_samples.cpu().detach().numpy()
-
-fig_sa, axes_sa = plt.subplots(3, 3, figsize=(8, 8))
-fig_sa.suptitle(f"{ARCH_LABEL} — SA Samples (Epochs={epochs}, Hidden={num_hidden})")
-for i, ax in enumerate(axes_sa.flat):
-    if i < len(sa_np):
-        ax.imshow(sa_np[i].reshape(grid_shape), cmap='gray', vmin=0, vmax=1)
-    ax.axis('off')
-plt.tight_layout()
-plt.savefig(f"arch3_{ARCH_NAME}_samples_sa.png")
-plt.savefig(os.path.join(data_dir, f"arch3_{ARCH_NAME}_{hparam_tag}_samples_sa.png"))
-print(f"Saved SA samples to arch3_{ARCH_NAME}_samples_sa.png")
-plt.show()
-
-print(f"\n{ARCH_LABEL} — Complete.")
+    print(f"\n{ARCH_LABEL} — Complete.")
