@@ -228,6 +228,28 @@ class CustomBoltzmannMachine(nn.Module):
             color_array[int(k)] = int(v)
         self.coloring = color_array
         #now self.coloring entry i holds the color of node i
+        
+        # Precompute color-based indexing for GPU-friendly access
+        # This avoids repeated np.where() calls during sampling
+        self.num_colors = int(color_array.max() + 1)
+        
+        # Mappings from global node index to local tensor index
+        v_global_to_local = {node: i for i, node in enumerate(self.bm_graph.visible_nodes)}
+        h_global_to_local = {node: i for i, node in enumerate(self.bm_graph.hidden_nodes)}
+        
+        # For each color, precompute the local indices of visible and hidden nodes
+        self.color_to_v_indices = []
+        self.color_to_h_indices = []
+        
+        for color in range(self.num_colors):
+            nodes_in_color = np.where(color_array == color)[0]
+            
+            v_local = [v_global_to_local[n] for n in nodes_in_color if n in self.bm_graph.visible_nodes]
+            h_local = [h_global_to_local[n] for n in nodes_in_color if n in self.bm_graph.hidden_nodes]
+            
+            # Convert to tensors for GPU-friendly indexing
+            self.color_to_v_indices.append(torch.tensor(v_local, dtype=torch.long, device=device) if v_local else None)
+            self.color_to_h_indices.append(torch.tensor(h_local, dtype=torch.long, device=device) if h_local else None)
 
     def _get_masked_weights(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Applies masks and enforces symmetry for intra-layer weights."""
@@ -412,30 +434,17 @@ class CustomBoltzmannMachine(nn.Module):
             Performs one full block Gibbs sampling step using the graph coloring.
             Updates all nodes of the same color in parallel.
             """
-            num_colors = int(self.coloring.max() + 1)
-            
-            # These are mappings from the global node index (0 to num_total-1) to the
-            # index within the visible or hidden tensors (0 to num_visible-1 or 0 to num_hidden-1).
-            v_global_to_local_idx = {node: i for i, node in enumerate(self.bm_graph.visible_nodes)}
-            h_global_to_local_idx = {node: i for i, node in enumerate(self.bm_graph.hidden_nodes)}
+            for color in range(self.num_colors):
+                # Use precomputed indices (GPU tensors)
+                v_indices_local = self.color_to_v_indices[color]
+                h_indices_local = self.color_to_h_indices[color]
 
-            for color in range(num_colors):
-                # Find global indices for nodes of the current color
-                nodes_in_color_global = np.where(self.coloring == color)[0]
-                
-                # Separate them into visible and hidden
-                v_nodes_global = [n for n in nodes_in_color_global if n in self.bm_graph.visible_nodes]
-                h_nodes_global = [n for n in nodes_in_color_global if n in self.bm_graph.hidden_nodes]
-
-                # Get the corresponding local indices for tensor slicing
-                v_indices_local = [v_global_to_local_idx[n] for n in v_nodes_global]
-                h_indices_local = [h_global_to_local_idx[n] for n in h_nodes_global]
-
-                if not v_indices_local and not h_indices_local:
+                if (v_indices_local is None or len(v_indices_local) == 0) and \
+                   (h_indices_local is None or len(h_indices_local) == 0):
                     continue # No nodes of this color
 
                 # --- Update Visible Units of this color ---
-                if v_indices_local and update_v:
+                if v_indices_local is not None and len(v_indices_local) > 0 and update_v:
                     # Fields from other visible units and all hidden units
                     field_v_from_v = v_state @ W_vv[:, v_indices_local]
                     field_v_from_h = h_state @ W_vh.T[:, v_indices_local]
@@ -451,7 +460,7 @@ class CustomBoltzmannMachine(nn.Module):
                     v_state[:, v_indices_local] = new_v_states
 
                 # --- Update Hidden Units of this color ---
-                if h_indices_local and update_h:
+                if h_indices_local is not None and len(h_indices_local) > 0 and update_h:
                     # Fields from all visible units and other hidden units
                     field_h_from_v = v_state @ W_vh[:, h_indices_local]
                     field_h_from_h = h_state @ W_hh[:, h_indices_local]
@@ -496,32 +505,24 @@ class CustomBoltzmannMachine(nn.Module):
 
         W_vv, W_hh, W_vh = self._get_masked_weights()
 
-        num_colors = int(self.coloring.max() + 1)
+        for color in range(self.num_colors):
+            # Use precomputed indices (GPU tensors)
+            v_indices_local = self.color_to_v_indices[color]
+            h_indices_local = self.color_to_h_indices[color]
 
-        v_global_to_local_idx = {node: i for i, node in enumerate(self.bm_graph.visible_nodes)}
-        h_global_to_local_idx = {node: i for i, node in enumerate(self.bm_graph.hidden_nodes)}
-
-        for color in range(num_colors):
-            nodes_in_color_global = np.where(self.coloring == color)[0]
-
-            v_nodes_global = [n for n in nodes_in_color_global if n in self.bm_graph.visible_nodes]
-            h_nodes_global = [n for n in nodes_in_color_global if n in self.bm_graph.hidden_nodes]
-
-            v_indices_local = [v_global_to_local_idx[n] for n in v_nodes_global]
-            h_indices_local = [h_global_to_local_idx[n] for n in h_nodes_global]
-
-            if not v_indices_local and not h_indices_local:
+            if (v_indices_local is None or len(v_indices_local) == 0) and \
+               (h_indices_local is None or len(h_indices_local) == 0):
                 continue
 
             # --- Update Visible Units of this color (deterministic) ---
-            if v_indices_local and update_v:
+            if v_indices_local is not None and len(v_indices_local) > 0 and update_v:
                 field_v_from_v = v_next @ W_vv[:, v_indices_local]
                 field_v_from_h = h_next @ W_vh.T[:, v_indices_local]
                 local_field_v = field_v_from_v + field_v_from_h + self.b_v[v_indices_local]
                 v_next[:, v_indices_local] = torch.sigmoid(local_field_v)
 
             # --- Update Hidden Units of this color (deterministic) ---
-            if h_indices_local and update_h:
+            if h_indices_local is not None and len(h_indices_local) > 0 and update_h:
                 field_h_from_v = v_next @ W_vh[:, h_indices_local]
                 field_h_from_h = h_next @ W_hh[:, h_indices_local]
                 local_field_h = field_h_from_v + field_h_from_h + self.b_h[h_indices_local]
