@@ -288,10 +288,10 @@ if __name__ == '__main__':
 
     # Training hyperparameters (matching test-RBM-as-custom-BM.py)
     lr = 5e-3
-    weight_decay = 0.0001
-    batch_size = 128
+    weight_decay = 0.00001
+    batch_size = 64
     epochs = 20
-    k_steps = 10
+    k_steps = 15
     persistent_chains = True
 
     # Sampling

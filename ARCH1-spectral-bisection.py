@@ -241,12 +241,12 @@ if __name__ == '__main__':
     num_visible = grid_shape[0] * grid_shape[1]
 
     # Training hyperparameters (matching test-RBM-as-custom-BM.py)
-    lr = 1e-4
-    weight_decay = 0.00001
+    lr = 5e-3
+    weight_decay = 0.001
     batch_size = 64
-    epochs = 100
-    k_steps = 10
-    persistent_chains = True
+    epochs = 10
+    k_steps = 5
+    persistent_chains = False
 
     # Sampling
     num_samples = 9

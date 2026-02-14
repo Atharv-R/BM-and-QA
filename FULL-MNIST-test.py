@@ -42,6 +42,11 @@ from bolmaqua import (
     relabel_visible_first,
 )
 
+from eval_quality import (
+    eval_samples_fullMNIST,
+    train_mnist_classifier,
+)
+
 # Import architecture-specific functions
 # (ARCH files now have if __name__ == '__main__' guards, so importing is safe)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -78,14 +83,14 @@ analyze_architecture = _arch1.analyze_architecture
 
 # ---- Architecture selection ----
 # Options: "spectral" (ARCH1), "tiling" (ARCH2), "ilp" (ARCH3)
-architecture = "tiling"
+architecture = "spectral"
 
 # ---- Zephyr graph parameter ----
 # D-Wave Advantage2 prototype: K≈4..6; full Advantage2 target: K≈12+
 # Z(6) = 1248 nodes; Z(7) = 1680; Z(8) = 2176
 # For 28x28 MNIST (784 visible), need K >= 5 (Z(5)=880, only 96 hidden)
 # K=6 recommended: 1248 nodes → 784 visible + 464 hidden
-K = 6
+K = 7
 
 # ---- Image configuration ----
 grid_shape = (28, 28)  # Full MNIST
@@ -97,20 +102,29 @@ binarize_threshold = 0.5
 digit_filter = None  # Use all 10 digits
 
 # ---- Training hyperparameters ----
-lr = 1e-4
-weight_decay = 0.0001  # L2 regularization (Adam weight_decay)
-batch_size = 128
-epochs = 20 # For testing, keep epochs small; increase for better results
-k_steps = 10
+lr = 1e-3
+weight_decay = 0.00001  # L2 regularization (Adam weight_decay)
+batch_size = 64
+epochs = 30 
+k_steps = 15
 persistent_chains = True
-eval_every = 5
+eval_every = 3
 
 # ---- Sampling ----
 num_samples = 16
-gibbs_burn_in = 200
-sa_start_temp = 10.0
-sa_end_temp = 0.1
-sa_iterations = 8
+gibbs_burn_in = 2000
+sa_start_temp = 5.0
+sa_end_temp = 0.5
+sa_iterations = 64
+
+# ---- Sample Quality Evaluation ----
+eval_num_samples = 400       # samples per method for FID evaluation
+eval_gibbs_burn_in = 2000    # burn-in for eval Gibbs sampling
+eval_sa_start_temp = 5.0     # batched SA start temp for eval
+eval_sa_end_temp = 0.1       # batched SA end temp for eval
+eval_sa_iterations = 500     # batched SA temperature steps for eval
+eval_fid_bootstrap = 100     # bootstrap resamples for FID CI
+eval_sampling_methods = ["gibbs", "sa_batched"]  # methods to evaluate
 
 # ---- ARCH1-specific: Spectral Bisection ----
 refinement_iters = 1000
@@ -377,7 +391,7 @@ training_history = train_boltzmann_machine_pcd(
 
 
 # =============================================================================
-# 6a. Save model and training history
+# 6a. Save model checkpoint (will be updated with quality metrics later)
 # =============================================================================
 
 model_path = os.path.join(data_dir, f"{file_prefix}_{hparam_tag}{digit_tag}_model.pt")
@@ -414,6 +428,7 @@ elif architecture == "ilp":
         'ilp_time_limit': ilp_time_limit,
     })
 
+# Early save (will be overwritten after quality evaluation with full metrics)
 torch.save({
     'model_state_dict': model.state_dict(),
     'training_history': training_history,
@@ -424,7 +439,7 @@ torch.save({
     'node_labels': node_labels,
     'hparam_tag': hparam_tag,
 }, model_path)
-print(f"Saved model to {model_path}")
+print(f"Saved initial model checkpoint to {model_path}")
 
 
 # =============================================================================
@@ -547,6 +562,54 @@ plt.close(fig_sa)
 
 
 # =============================================================================
+# 8a. Comprehensive Sample Quality Evaluation (FID + Classifier metrics)
+# =============================================================================
+
+print(f"\n{'='*70}")
+print(f"  SAMPLE QUALITY EVALUATION")
+print(f"{'='*70}")
+
+quality_report = eval_samples_fullMNIST(
+    model,
+    real_data=train_data,
+    grid_shape=grid_shape,
+    num_samples=eval_num_samples,
+    gibbs_burn_in=eval_gibbs_burn_in,
+    batched_sa_start_temp=eval_sa_start_temp,
+    batched_sa_end_temp=eval_sa_end_temp,
+    batched_sa_iterations=eval_sa_iterations,
+    sa_start_temp=sa_start_temp,
+    sa_end_temp=sa_end_temp,
+    sa_iterations=sa_iterations,
+    sampling_methods=eval_sampling_methods,
+    n_fid_bootstrap=eval_fid_bootstrap,
+    verbose=True,
+)
+
+# Save sample grids for each eval method
+for method_name, method_data in quality_report['sampling_results'].items():
+    eval_samples_np = method_data['samples'].numpy()
+    n_show = min(16, len(eval_samples_np))
+    nr = int(np.ceil(np.sqrt(n_show)))
+    nc = int(np.ceil(n_show / nr))
+    fig_eval, axes_eval = plt.subplots(nr, nc, figsize=(2 * nc, 2 * nr))
+    fid_val = method_data['fid']['fid']
+    fig_eval.suptitle(
+        f"Full MNIST {ARCH_LABEL} — {method_name} (FID={fid_val:.1f})")
+    for i, ax in enumerate(axes_eval.flat):
+        if i < n_show:
+            ax.imshow(eval_samples_np[i].reshape(grid_shape), cmap='gray', vmin=0, vmax=1)
+        ax.axis('off')
+    plt.tight_layout()
+    eval_fig_path = os.path.join(
+        data_dir, f"{file_prefix}_{hparam_tag}{digit_tag}_eval_{method_name}.png")
+    plt.savefig(eval_fig_path, dpi=150)
+    plt.savefig(f"{file_prefix}_eval_{method_name}.png", dpi=150)
+    print(f"Saved {method_name} eval samples to {eval_fig_path}")
+    plt.close(fig_eval)
+
+
+# =============================================================================
 # 9. Test set evaluation
 # =============================================================================
 
@@ -576,11 +639,30 @@ with open(results_path, 'w') as f:
     f.write(f"\nHyperparameters:\n")
     for k, v in hyperparams.items():
         f.write(f"  {k}: {v}\n")
-    f.write(f"\nTest Results:\n")
+    f.write(f"\nTest Results (reconstruction + PLL):\n")
     f.write(f"  Reconstruction MSE:  {test_metrics['mse']:.6f}\n")
     f.write(f"  Reconstruction BCE:  {test_metrics['bce']:.6f}\n")
     f.write(f"  Reconstruction Acc:  {test_metrics['accuracy']:.6f}\n")
     f.write(f"  PLL (500 samples):   {test_pll:.6f}\n")
+    f.write(f"\nSample Quality (FID + Classifier):\n")
+    f.write(f"  Best method: {quality_report['best_method']}\n")
+    f.write(f"  Best FID:    {quality_report['best_fid']:.4f}\n")
+    for m, r in quality_report['sampling_results'].items():
+        f.write(f"\n  --- {m} ---\n")
+        f.write(f"    FID:               {r['fid']['fid']:.4f}\n")
+        f.write(f"    FID CI ({r['fid']['ci_level']*100:.0f}%):     "
+                f"[{r['fid']['ci_low']:.4f}, {r['fid']['ci_high']:.4f}]\n")
+        f.write(f"    FID std:           {r['fid']['fid_std']:.4f}\n")
+        f.write(f"    Mean confidence:   {r['classifier']['mean_confidence']:.4f}\n")
+        f.write(f"    High confidence:   {r['classifier']['frac_high_confidence']:.4f}\n")
+        f.write(f"    Class balance H:   {r['classifier']['class_balance_entropy']:.4f}\n")
+        f.write(f"    Sampling time:     {r['time_seconds']:.1f}s\n")
+        f.write(f"    Class dist: ")
+        for d in range(10):
+            pct = r['classifier']['class_distribution'][d] * 100
+            if pct > 0:
+                f.write(f"{d}:{pct:.0f}% ")
+        f.write(f"\n")
     f.write(f"\nArchitecture Stats:\n")
     f.write(f"  VH edges: {stats['vh']}\n")
     f.write(f"  VV edges: {stats['vv']}\n")
@@ -590,8 +672,41 @@ with open(results_path, 'w') as f:
     f.write(f"  Hparam tag: {hparam_tag}\n")
 print(f"Saved results to {results_path}")
 
+# Also save the quality report into the model checkpoint
+torch.save({
+    'model_state_dict': model.state_dict(),
+    'training_history': training_history,
+    'arch_name': ARCH_NAME,
+    'arch_label': ARCH_LABEL,
+    'hyperparams': hyperparams,
+    'graph_edges': list(G_relabeled.edges()),
+    'node_labels': node_labels,
+    'hparam_tag': hparam_tag,
+    'quality_report': {
+        'best_method': quality_report['best_method'],
+        'best_fid': quality_report['best_fid'],
+        'methods': {
+            m: {
+                'fid': r['fid'],
+                'classifier': {k: v for k, v in r['classifier'].items() if k != 'predicted_classes'},
+                'time_seconds': r['time_seconds'],
+            }
+            for m, r in quality_report['sampling_results'].items()
+        },
+    },
+    'test_metrics': {
+        'mse': test_metrics['mse'],
+        'bce': test_metrics['bce'],
+        'accuracy': test_metrics['accuracy'],
+        'pll': test_pll,
+    },
+}, model_path)
+print(f"Updated model checkpoint with quality metrics: {model_path}")
+
 
 print(f"\n{'='*70}")
 print(f"  Full MNIST {ARCH_LABEL} — Complete!")
 print(f"  Model: {model_path}")
+print(f"  Best sampling method: {quality_report['best_method']}")
+print(f"  Best FID: {quality_report['best_fid']:.2f}")
 print(f"{'='*70}")
