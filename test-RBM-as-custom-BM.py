@@ -98,6 +98,34 @@ def create_rbm_graph(num_visible, num_hidden):
         
     return G, node_labels
 
+def _neal_sample(model, num_samples: int, num_sweeps: int = 20,
+                 beta_range: tuple[float, float] | None = (0.1, 3.0),
+                 seed: int | None = None,
+                 verbose: bool = True) -> torch.Tensor:
+    """
+    Generate samples using D-Wave's Neal SimulatedAnnealingSampler.
+
+    Delegates to BM_Neal_Sampler in bolmaqua.  This thin wrapper exists
+    so that eval_samples_fullMNIST can call it with a uniform interface.
+
+    Args:
+        model: Trained CustomBoltzmannMachine.
+        num_samples: Number of SA reads.
+        num_sweeps: Number of sweeps per read.
+        beta_range: Optional (beta_start, beta_end).
+        seed: PRNG seed.
+        verbose: Print progress.
+
+    Returns:
+        (num_samples, num_visible) tensor on CPU.
+    """
+    from bolmaqua import BM_Neal_Sampler
+    return BM_Neal_Sampler(
+        model, num_samples=num_samples, num_sweeps=num_sweeps,
+        beta_range=beta_range, seed=seed, verbose=verbose,
+    )
+
+
 
 print("==========================================")
 print("Testing Custom BM Implementation with RBM Architecture (Bipartite Graph)")
@@ -116,19 +144,15 @@ num_hidden = 64
 lr = 1e-4
 weight_decay = 0.001
 batch_size = 64
-epochs = 30
-k_steps = 10
+epochs = 40
+k_steps = 15
 persistent_chains = True
 
 # End-of-training sampling: Gibbs
 num_samples = 9
 gibbs_burn_in = 1000
 
-# End-of-training sampling: Simulated Annealing
-sa_start_temp = 10.0
-sa_end_temp = 0.2
-sa_iterations = 8
-sa_track_best = True
+
 
 #%% 2. Data Loading
 print("Loading 12x12 MNIST data (0s and 1s)...")
@@ -257,6 +281,14 @@ print("Saved samples to rbm_test_samples.png")
 plt.show()
 
 #%% 7. Simulated Annealing Sampling & Visualization
+
+# End-of-training sampling: Simulated Annealing
+sa_start_temp = 10.0
+sa_end_temp = 0.1
+sa_iterations = 20
+sa_track_best = True
+
+
 print("Generating samples with BM_SimAnn_Sampler...")
 sa_samples = BM_SimAnn_Sampler(
     model=model,
@@ -286,8 +318,31 @@ plt.savefig("rbm_test_samples_simann.png")
 print("Saved SA samples to rbm_test_samples_simann.png")
 plt.show()
 
-print("Test complete. Window closed.")
+#%% 8. Neal Sampling & Visualization
+print("Generating samples with Neal SimulatedAnnealingSampler...")
+neal_samples = _neal_sample(
+    model, num_samples=num_samples, num_sweeps=100,
+    beta_range=(0.01, 10.0), seed=42, verbose=True,
+)
+
+neal_samples_np = neal_samples.cpu().detach().numpy()
+
+fig_neal, axes_neal = plt.subplots(4, 4, figsize=(8, 8))
+fig_neal.suptitle(
+    f"RBM Neal SA Samples (Epochs={epochs}, Hidden={num_hidden})"
+)
+
+for i, ax in enumerate(axes_neal.flat):
+    if i < len(neal_samples_np):
+        img = neal_samples_np[i].reshape(GRID_SHAPE)
+        ax.imshow(img, cmap='gray', vmin=0, vmax=1)
+    ax.axis('off')
+
+plt.tight_layout()
+plt.savefig("rbm_test_samples_neal.png")
+print("Saved Neal samples to rbm_test_samples_neal.png")
+plt.show()
 
 
 
-# %%
+#%%
