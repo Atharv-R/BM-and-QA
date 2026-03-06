@@ -1,0 +1,64 @@
+[
+  {
+    "trial": 1,
+    "timestamp": "2026-02-19T21:28:21.742056",
+    "best_fid": 17.39578385133339,
+    "best_method": "neal",
+    "model_path": "data/hpsearch_20260219_212611_trial001_embedding_PCD_lr2.0e-05_ep20_fid17_model.pt",
+    "config": {
+      "architecture": "embedding",
+      "lr": 1.9974651622461494e-05,
+      "weight_decay": 0.0001677457397905576,
+      "batch_size": 64,
+      "epochs": 20,
+      "k_steps": 10,
+      "persistent": true,
+      "K": 8,
+      "grid_shape": [
+        28,
+        28
+      ],
+      "num_visible": 784,
+      "initial_grid_size": 8,
+      "add_node_criterion": "connectivity",
+      "num_hidden": 1392
+    },
+    "arch_stats": {
+      "vh": 12848,
+      "vv": 1376,
+      "hh": 6104
+    },
+    "total_time_seconds": 129.7472243309021,
+    "fid_per_method": {
+      "gibbs": {
+        "fid": 19.51253792523668,
+        "ci_low": 19.004851483628318,
+        "ci_high": 20.041037785021384,
+        "fid_std": 0.2676664220303611,
+        "mean_confidence": 0.7319902181625366,
+        "frac_high_confidence": 0.3925,
+        "class_balance_entropy": 0.06293300616044681
+      },
+      "sa_batched": {
+        "fid": 21.958858783947168,
+        "ci_low": 21.77309110931687,
+        "ci_high": 22.127406494183127,
+        "fid_std": 0.10030324867691054,
+        "mean_confidence": 0.40501517057418823,
+        "frac_high_confidence": 0.0,
+        "class_balance_entropy": 0.08464092754409093
+      },
+      "neal": {
+        "fid": 17.39578385133339,
+        "ci_low": 17.18325556795312,
+        "ci_high": 17.638722245552103,
+        "fid_std": 0.10846543659940089,
+        "mean_confidence": 0.30340445041656494,
+        "frac_high_confidence": 0.0,
+        "class_balance_entropy": 1.0410816704796446
+      }
+    },
+    "final_pll": -0.28952665328979493,
+    "final_pcd_loss": -53.513713205636755
+  }
+]

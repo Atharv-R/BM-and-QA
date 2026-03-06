@@ -1,0 +1,31 @@
+
+Idea for another possible architecture: 
+
+START with taking an good embedding of a BIPARTITE graph into the 
+zephyr graph -- to get close to an RBM. Say we can do 8x8, 9x9 or 10x10 
+easily. 
+
+Use that as a starting point and determine which nodes should be 
+turned into visible nodes. So we get something "close" to an RBM, 
+or something that already has lots of hidden-visible connections 
+(through node fusions / chaining), and modify from there; intelligently designate 
+visible nodes to add to scale up. 
+The initial smaller "grid" we use should be a "sub-grid" of the final grid of visible 
+nodes for the images (those initial visible nodes should be equally spaced 
+out in the final full size image). For example, with a 5 x 5 "full size" image with a 2x2 "initial grid" that 
+we would embed in a tiny example, the inital grid would be as follows in the 
+final image, initial nodes denotes as i and later nodes denoted as o: 
+
+o o o o o 
+o i o i o 
+o o o o o 
+o i o i o 
+o o o o o 
+
+Having "initial" nodes not on the edge of the grid is preferred, 
+but not absolutely necessary. 
+The nodes we add later (the "o"s) should ideally be close to the "i"s 
+in the zephyr graph embedding. This need not be a direct connection, but can be through 
+a hidden node as well. 
+The idea is the i's capture mostly global information, 
+and the o's act more locally. 

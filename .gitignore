@@ -69,3 +69,7 @@ rbm_test_samples.png
 agent_memory.txt
 .gitignore
 .gitignore
+
+data/hpsearch*
+
+*.png

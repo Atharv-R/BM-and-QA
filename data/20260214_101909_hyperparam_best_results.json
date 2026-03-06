@@ -1,0 +1,306 @@
+[
+  {
+    "trial": 17,
+    "timestamp": "2026-02-14T11:53:15.913812",
+    "best_fid": 236.10843024752083,
+    "best_method": "gibbs",
+    "model_path": "data/hpsearch_20260214_101909_trial017_tiling_PCD_lr2.9e-04_ep50_fid236_model.pt",
+    "config": {
+      "architecture": "tiling",
+      "lr": 0.0002856063264611143,
+      "weight_decay": 0.0002167102413915118,
+      "batch_size": 32,
+      "epochs": 50,
+      "k_steps": 15,
+      "persistent": true,
+      "K": 7,
+      "grid_shape": [
+        28,
+        28
+      ],
+      "num_visible": 784,
+      "patch_size": 2,
+      "num_hidden": 896
+    },
+    "arch_stats": {
+      "vh": 10800,
+      "vv": 1900,
+      "hh": 2844
+    },
+    "total_time_seconds": 854.1851277351379,
+    "fid_per_method": {
+      "gibbs": {
+        "fid": 236.10843024752083,
+        "ci_low": 236.71416631928102,
+        "ci_high": 285.6468895135256,
+        "fid_std": 12.36517955241088,
+        "mean_confidence": 0.7828129529953003,
+        "frac_high_confidence": 0.555,
+        "class_balance_entropy": 2.215321288093828
+      },
+      "sa_batched": {
+        "fid": 481.15198196031673,
+        "ci_low": 461.2072681014605,
+        "ci_high": 552.7989662959984,
+        "fid_std": 22.964444636527702,
+        "mean_confidence": 0.8329427242279053,
+        "frac_high_confidence": 0.6775,
+        "class_balance_entropy": 2.0424101550288283
+      },
+      "neal": {
+        "fid": 1655.6831232586524,
+        "ci_low": 1584.2923737312951,
+        "ci_high": 1770.6803679819907,
+        "fid_std": 45.73940872266084,
+        "mean_confidence": 0.8111668229103088,
+        "frac_high_confidence": 0.595,
+        "class_balance_entropy": 1.9924321101304014
+      }
+    },
+    "final_pll": -0.10236747741699219,
+    "final_pcd_loss": -10.3867375
+  },
+  {
+    "trial": 3,
+    "timestamp": "2026-02-14T10:40:01.804938",
+    "best_fid": 262.01673007227924,
+    "best_method": "gibbs",
+    "model_path": "data/hpsearch_20260214_101909_trial003_tiling_PCD_lr1.6e-04_ep20_fid262_model.pt",
+    "config": {
+      "architecture": "tiling",
+      "lr": 0.00016308039008181517,
+      "weight_decay": 6.832381761358685e-06,
+      "batch_size": 32,
+      "epochs": 20,
+      "k_steps": 20,
+      "persistent": true,
+      "K": 7,
+      "grid_shape": [
+        28,
+        28
+      ],
+      "num_visible": 784,
+      "patch_size": 2,
+      "num_hidden": 896
+    },
+    "arch_stats": {
+      "vh": 10800,
+      "vv": 1900,
+      "hh": 2844
+    },
+    "total_time_seconds": 436.42996406555176,
+    "fid_per_method": {
+      "gibbs": {
+        "fid": 262.01673007227924,
+        "ci_low": 263.1046679583332,
+        "ci_high": 302.23993494788687,
+        "fid_std": 10.585538822089964,
+        "mean_confidence": 0.7533357739448547,
+        "frac_high_confidence": 0.5,
+        "class_balance_entropy": 2.2321530157698
+      },
+      "sa_batched": {
+        "fid": 684.6149727301291,
+        "ci_low": 648.5451053534813,
+        "ci_high": 777.0441056430755,
+        "fid_std": 31.20619070598895,
+        "mean_confidence": 0.8575886487960815,
+        "frac_high_confidence": 0.7025,
+        "class_balance_entropy": 2.054381669116533
+      },
+      "neal": {
+        "fid": 1110.0136548109504,
+        "ci_low": 1052.3443899386718,
+        "ci_high": 1227.9026408547686,
+        "fid_std": 45.60042832267914,
+        "mean_confidence": 0.8288366794586182,
+        "frac_high_confidence": 0.64,
+        "class_balance_entropy": 2.046896292776915
+      }
+    },
+    "final_pll": -0.0985653305053711,
+    "final_pcd_loss": -15.88942587890625
+  },
+  {
+    "trial": 16,
+    "timestamp": "2026-02-14T11:39:01.378691",
+    "best_fid": 269.85262773937905,
+    "best_method": "gibbs",
+    "model_path": "data/hpsearch_20260214_101909_trial016_tiling_PCD_lr2.3e-04_ep50_fid270_model.pt",
+    "config": {
+      "architecture": "tiling",
+      "lr": 0.00023454037300748388,
+      "weight_decay": 2.085606964423432e-06,
+      "batch_size": 128,
+      "epochs": 50,
+      "k_steps": 25,
+      "persistent": true,
+      "K": 7,
+      "grid_shape": [
+        28,
+        28
+      ],
+      "num_visible": 784,
+      "patch_size": 4,
+      "num_hidden": 896
+    },
+    "arch_stats": {
+      "vh": 6272,
+      "vv": 4536,
+      "hh": 4736
+    },
+    "total_time_seconds": 336.5874755382538,
+    "fid_per_method": {
+      "gibbs": {
+        "fid": 269.85262773937905,
+        "ci_low": 269.6154174261785,
+        "ci_high": 310.02070303311666,
+        "fid_std": 11.415231956500257,
+        "mean_confidence": 0.7563753724098206,
+        "frac_high_confidence": 0.4825,
+        "class_balance_entropy": 2.1905068819805944
+      },
+      "sa_batched": {
+        "fid": 486.4393679747633,
+        "ci_low": 467.9959449056828,
+        "ci_high": 546.7852676842722,
+        "fid_std": 20.636518386826083,
+        "mean_confidence": 0.8087092638015747,
+        "frac_high_confidence": 0.6125,
+        "class_balance_entropy": 2.0840366233757788
+      },
+      "neal": {
+        "fid": 1394.620504002025,
+        "ci_low": 1346.8189556328753,
+        "ci_high": 1504.1399989094184,
+        "fid_std": 43.09605538849936,
+        "mean_confidence": 0.846880316734314,
+        "frac_high_confidence": 0.6875,
+        "class_balance_entropy": 2.071153348626114
+      }
+    },
+    "final_pll": -0.13730170249938964,
+    "final_pcd_loss": -11.117989825387287
+  },
+  {
+    "trial": 8,
+    "timestamp": "2026-02-14T11:07:29.545467",
+    "best_fid": 383.06867254281616,
+    "best_method": "gibbs",
+    "model_path": "data/hpsearch_20260214_101909_trial008_ilp_PCD_lr7.8e-04_ep50_fid383_model.pt",
+    "config": {
+      "architecture": "ilp",
+      "lr": 0.0007837760246185372,
+      "weight_decay": 0.00011236808940340585,
+      "batch_size": 32,
+      "epochs": 50,
+      "k_steps": 10,
+      "persistent": true,
+      "K": 7,
+      "grid_shape": [
+        28,
+        28
+      ],
+      "num_visible": 784,
+      "num_hidden": 896
+    },
+    "arch_stats": {
+      "vh": 12080,
+      "vv": 1389,
+      "hh": 2075
+    },
+    "total_time_seconds": 622.7937111854553,
+    "fid_per_method": {
+      "gibbs": {
+        "fid": 383.06867254281616,
+        "ci_low": 371.5786090091636,
+        "ci_high": 439.31009084267714,
+        "fid_std": 17.238824461087418,
+        "mean_confidence": 0.8040254712104797,
+        "frac_high_confidence": 0.59,
+        "class_balance_entropy": 2.0800603579561594
+      },
+      "sa_batched": {
+        "fid": 559.2104620425254,
+        "ci_low": 531.6298905345668,
+        "ci_high": 629.1402448118837,
+        "fid_std": 24.455894633001478,
+        "mean_confidence": 0.8225604295730591,
+        "frac_high_confidence": 0.6425,
+        "class_balance_entropy": 2.163237626697238
+      },
+      "neal": {
+        "fid": 1668.9962446016652,
+        "ci_low": 1598.399495159793,
+        "ci_high": 1788.0110485225941,
+        "fid_std": 48.70595846209846,
+        "mean_confidence": 0.8362785577774048,
+        "frac_high_confidence": 0.66,
+        "class_balance_entropy": 1.6948648519043126
+      }
+    },
+    "final_pll": -0.06408645629882813,
+    "final_pcd_loss": -6.269919401041666
+  },
+  {
+    "trial": 21,
+    "timestamp": "2026-02-14T12:10:03.951776",
+    "best_fid": 385.68467314008467,
+    "best_method": "gibbs",
+    "model_path": "data/hpsearch_20260214_101909_trial021_tiling_PCD_lr8.4e-04_ep40_fid386_model.pt",
+    "config": {
+      "architecture": "tiling",
+      "lr": 0.0008399006014576123,
+      "weight_decay": 1.573899146963746e-05,
+      "batch_size": 128,
+      "epochs": 40,
+      "k_steps": 25,
+      "persistent": true,
+      "K": 7,
+      "grid_shape": [
+        28,
+        28
+      ],
+      "num_visible": 784,
+      "patch_size": 2,
+      "num_hidden": 896
+    },
+    "arch_stats": {
+      "vh": 10800,
+      "vv": 1900,
+      "hh": 2844
+    },
+    "total_time_seconds": 269.8605942726135,
+    "fid_per_method": {
+      "gibbs": {
+        "fid": 385.68467314008467,
+        "ci_low": 373.7838930089987,
+        "ci_high": 439.70435473738786,
+        "fid_std": 16.991793004513273,
+        "mean_confidence": 0.8032588362693787,
+        "frac_high_confidence": 0.59,
+        "class_balance_entropy": 2.119895777284206
+      },
+      "sa_batched": {
+        "fid": 646.2786331128816,
+        "ci_low": 612.7097475195264,
+        "ci_high": 717.6880702151153,
+        "fid_std": 25.99264596423238,
+        "mean_confidence": 0.8311560750007629,
+        "frac_high_confidence": 0.6475,
+        "class_balance_entropy": 2.0562397031105273
+      },
+      "neal": {
+        "fid": 1969.244087461638,
+        "ci_low": 1867.7983946377085,
+        "ci_high": 2101.5256310457416,
+        "fid_std": 62.21008067560945,
+        "mean_confidence": 0.8240513801574707,
+        "frac_high_confidence": 0.65,
+        "class_balance_entropy": 2.066374945658721
+      }
+    },
+    "final_pll": -0.0937730598449707,
+    "final_pcd_loss": -7.040096967648237
+  }
+]

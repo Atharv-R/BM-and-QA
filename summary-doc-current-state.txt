@@ -1,0 +1,784 @@
+================================================================================
+PROJECT SUMMARY — Updated February 13, 2026
+BM-and-QA: Boltzmann Machines on Quantum Annealer Hardware Graphs
+================================================================================
+ 
+1. RESEARCH GOAL
+================================================================================
+
+The core research idea: Boltzmann Machines (BMs) are energy-based models whose
+sampling problem maps directly onto quantum annealing (QA). D-Wave quantum
+annealers natively implement Ising-model Hamiltonians, so a BM whose graph
+architecture matches the QA chip topology can be sampled *directly* on the
+hardware — no minor embedding required.
+
+Traditionally, Restricted Boltzmann Machines (RBMs) are used in ML. RBMs have a
+complete bipartite graph (all visible connected to all hidden, no intra-layer
+edges). This bipartite structure enables efficient block Gibbs sampling on
+classical hardware, but it embeds very poorly onto QA chip graphs. The embedding
+overhead is so severe that only tiny RBMs fit on current hardware.
+
+Our approach: instead of embedding an RBM into the chip, work directly with the
+chip's native graph topology. Designate some physical qubits as "visible" (data)
+nodes and the rest as "hidden" (latent) nodes, then train the resulting
+general (non-restricted) Boltzmann machine classically. Once trained, the BM
+can be sampled on the actual QA hardware with zero embedding overhead.
+
+The key research question is: how should we partition the chip's nodes into
+visible vs. hidden to maximize learning quality? This is the "node assignment
+problem" and is the main focus of the current work.
+
+Current hardware target: D-Wave Advantage2 processors, which use the "Zephyr"
+graph topology. The Zephyr graph Z(K) has:
+  - n(K) = 16K(2K+1) nodes
+  - m(K) = 320K² - 16K - 24 edges
+  - Maximum degree Δ = 20 (constant for K ≥ 3)
+For K=3: 336 nodes, 2808 edges. Current Advantage2 prototypes have K≈4..6;
+future chips will have larger K.
+
+Scalability result (derived in the LaTeX document): For a custom BM on Z(K),
+we can represent images up to R_custom ≈ √(n/2) pixels per side, whereas an
+RBM embedding scales only as R_RBM ≈ (nΔ/2)^{1/4}. The custom BM advantage
+grows as Θ(√n). For K=15 (plausible near-future chip), custom BM handles
+~29×29 pixels vs. ~13×13 for embedded RBM.
+
+
+2. CURRENT EXPERIMENTAL SETUP
+================================================================================
+
+We operate at two scales:
+
+--- Small scale (proof-of-concept, largely completed) ---
+
+Dataset: MNIST digits 0 and 1, downsized to 12×12 pixels, binarized (threshold
+at 0.5). This gives 144 visible units. Stored as .npy files:
+  mnist12x12_trainfeats.npy, mnist12x12_trainlabels.npy, etc.
+(Also 13×13 variants exist.)
+
+Hardware graph: Zephyr Z(3), which has 336 nodes and 2808 edges. With 144
+visible units and 192 hidden units.
+
+--- Full scale (current focus) ---
+
+Dataset: Full MNIST (all 10 digits), 28×28 pixels, binarized at 0.5.
+This gives 784 visible units. Downloaded via torchvision at runtime.
+
+Hardware graph: Zephyr Z(7), which has 1680 nodes. With 784 visible units,
+this gives ~896 hidden units. K=7 was chosen to provide a healthy ratio of
+hidden-to-visible nodes while remaining tractable. The scripts support
+other values of K via CLI (--K flag).
+
+Training: Persistent Contrastive Divergence (PCD) with:
+  - Positive phase: mean-field approximation (not sampling)
+  - Negative phase: block Gibbs sampling using graph coloring
+    (nodes of the same color in a proper graph coloring are conditionally
+    independent and can be updated in parallel)
+  - Adam optimizer with weight decay
+
+Sampling (post-training): Four methods are available:
+  1. Block Gibbs sampling (batched) — all N chains run in parallel using the
+     graph coloring. Fast. Default burn-in: 2000 steps.
+  2. Batched simulated annealing (SA) — block Gibbs updates at annealed
+     temperatures (inverse temperature scales linearly from low to high).
+     All N chains run in parallel. Fast and recommended.
+  3. Sequential SA — the original BM_SimAnn_Sampler, one chain at a time.
+     Slow, kept for backward compatibility and comparison.
+  4. Neal SA (D-Wave) — uses D-Wave's neal.SimulatedAnnealingSampler via a
+     dimod BinaryQuadraticModel (BINARY vartype). Converts the BM energy
+     function into a BQM by negating all coefficients (so BQM minimization
+     = sampling high-probability BM states). This is the closest classical
+     approximation to sampling on real D-Wave quantum annealing hardware.
+     Default: 1000 sweeps. Configurable via num_sweeps, beta_range, seed.
+
+Evaluation metrics:
+  - During training: PCD loss and PLL per epoch, reconstruction MSE/BCE/accuracy
+    periodically.
+  - Post-training (primary quality metric): FID in classifier feature space,
+    with bootstrap confidence intervals. See Section 4 for details.
+
+Important note on metrics: Reconstruction metrics (MSE, BCE, accuracy) do NOT
+correlate well with actual generative quality. PLL ignores HH couplings (it's
+an RBM-style approximation), making it imperfect for general BMs. FID is the
+primary metric used for hyperparameter comparison.
+
+
+3. THE NODE ASSIGNMENT PROBLEM — THREE ARCHITECTURES
+================================================================================
+
+We have implemented three strategies for partitioning Z(K) nodes into visible
+and hidden sets. Each is a standalone Python script that:
+  (a) constructs the architecture (V/H partition + pixel assignment)
+  (b) builds and trains the BM
+  (c) generates and saves sample images
+  (d) saves the trained model with hyperparameters to data/
+
+--- ARCH1: Spectral Bisection (ARCH1-spectral-bisection.py) ---
+
+Idea: Use the Fiedler vector (2nd eigenvector of the graph Laplacian) to find
+the partition that approximately maximizes the visible-hidden edge cut. This
+makes the architecture closest to an RBM (maximizing VH connectivity).
+
+Steps:
+  1. Compute dense Laplacian eigendecomposition of G
+  2. Sort nodes by Fiedler value; take top-p or bottom-p as visible
+  3. Pick whichever orientation gives more VH edges
+  4. Local swap refinement: random V↔H swaps accepted if they improve
+     Φ(V) = |E_VH| − γ|E_VV|  (γ=0.01, 500 iterations)
+  5. Greedy spatial pixel assignment (nearest-node matching)
+
+Character: Global partition — visible nodes cluster on one "side" of the graph.
+Every visible node has many hidden neighbors, but visible nodes are far from
+each other in graph distance, potentially hurting spatial locality.
+
+Determinism note: The initial Fiedler partition is deterministic, but
+refine_partition_swaps() uses random swaps (np.random), so different runs
+produce different results even with the same parameters.
+
+--- ARCH2: Hierarchical Tiling (ARCH2-hierarchical-tiling.py) ---
+
+Idea: Partition the Zephyr graph into spatial "tiles" that correspond to image
+patches. Within each tile, select some nodes as visible (for that patch's
+pixels) and the rest as hidden (local feature detectors). This creates a
+locally-connected architecture analogous to convolutional networks.
+
+Steps:
+  1. Divide the image into patch_size × patch_size patches → T tiles
+  2. Compute tile centers in Zephyr layout space
+  3. Voronoi assignment: each graph node → nearest tile center
+  4. Rebalance tiles (steal nodes from over-populated neighbors)
+  5. Within each tile, select visible nodes by highest local degree
+  6. Greedy spatial matching of pixels to visible nodes within each tile
+
+Character: Distributed partition — visible nodes are spread throughout the
+graph, each guaranteed nearby hidden neighbors. Local VH connectivity is high
+within tiles, and inter-tile HH edges provide long-range correlations.
+
+Determinism note: Fully deterministic for a given (K, patch_size). For 28×28
+MNIST, valid patch sizes that divide 28 are: 2, 4, 7 (also 1, 14, 28 but
+these are degenerate). Since there are only 3 useful configs, they are
+pre-computed and cached at startup in the hyperparameter search script.
+
+--- ARCH3: ILP Bidirectional Optimization (ARCH3-ilp-bidirectional.py) ---
+
+Idea: Formulate the partition as an Integer Linear Program (ILP) that directly
+optimizes a learning-quality proxy:
+    maximize   α·t_V + β·t_H − γ·|E_VV|
+where t_V = min VH-degree across visible nodes (every pixel sees hidden units),
+      t_H = min VH-degree across hidden nodes (every hidden sees pixels).
+
+This is a "maximin" objective: it ensures the *worst-case* node on both sides
+still has good cross-connectivity. Uses McCormick linearization for the
+quadratic VV-edge terms. Solved with SCIP (via pyscipopt); falls back to
+greedy if SCIP is unavailable. Uses spectral bisection as warm start.
+
+Character: Optimized partition — directly targets the theoretical proxy for
+learning quality. Balances both encoding (V→H) and decoding (H→V) directions.
+
+Solver optimization: The y_{ij} variables (McCormick linearization of x_i·x_j)
+are declared as continuous [0,1] rather than binary. The three linearization
+constraints force y = x_i·x_j at any integer x solution, so branching on
+~11K y-variables is unnecessary. This dramatically reduces solver time.
+
+Determinism note: The SCIP solver is deterministic for fixed parameters.
+However, the ILP solve is expensive on the full-scale graph (Z(7) has 1680
+nodes). For this reason, the hyperparameter search uses a single canonical
+ILP solution (α=1, β=1, γ=0.05) that is solved once with a 1-hour time limit
+and cached to disk at data/ilp_canonical_assignment_K{K}.json.
+The greedy fallback uses np.random and is NOT deterministic.
+
+--- ARCH4: Embedding-Based Hybrid (ARCH4-embedding-chimera.py) ---
+
+Idea: Instead of algorithmically selecting visible nodes from Zephyr,
+embed a complete bipartite graph K_{p,p} (the RBM "core") into Z(K) using
+minorminer, then break chains and expand.
+
+Algorithm:
+  Phase 1: Compute an evenly-spaced initial sub-grid of size
+    initial_grid_size × initial_grid_size within the target grid_shape.
+    These are the "core" pixels (p = initial_grid_size²).
+  Phase 2: Use minorminer to embed K_{p,p} into Z(K). This gives an
+    embedding where each logical node maps to a chain of physical qubits.
+  Phase 3: Break chains — select one physical qubit per chain as the
+    "anchor" (highest-degree within chain). The remaining chain qubits
+    become hidden nodes.
+  Phase 4: Match anchor nodes to initial sub-grid pixels via optimal
+    assignment (Munkres/Hungarian algorithm on Zephyr-layout distances).
+  Phase 5: Expand visible set — greedily add more Zephyr nodes as visible
+    to fill the remaining (grid_shape[0]×grid_shape[1] - p) pixels.
+    Two criteria:
+      - graph_distance: prefer nodes close (BFS) to existing visible set
+      - connectivity: prefer nodes with many hidden-chain neighbors
+  Phase 6: Assign expansion pixels via spatial matching.
+  Phase 7: Cache full assignment to disk.
+
+Character: Hybrid approach — combines the theoretical strength of the RBM
+structure (every initial pixel fully connected to every initial hidden) with
+the expanded visible capacity of the chip. The RBM core ensures strong VH
+connectivity for a subset of pixels; expansion fills the rest.
+
+Feasibility on Z(8) (2176 nodes, 20328 edges):
+  - K_{81,81} (9×9 core): SUCCESS, uses ~1411 qubits, max chain=13, avg=8.7
+  - K_{100,100} (10×10 core): FAILED
+  - K_{144,144} (12×12 core): FAILED
+  For 28×28 images on Z(8), initial_grid_size=9 is the largest feasible core.
+
+Determinism note: minorminer uses randomized heuristics, so embeddings may
+vary between runs. For this reason, the full assignment (visible_in_pixel_order
++ hidden_nodes) is cached to disk at:
+  data/arch4_assignment_K{K}_{nrows}x{ncols}_init{initial_grid_size}_{criterion}.json
+Once cached, results are deterministic. The hyperparameter search pre-computes
+assignments for all candidate (initial_grid_size, criterion) combinations.
+
+
+4. SAMPLE QUALITY EVALUATION — FID
+================================================================================
+
+The primary metric for comparing hyperparameter configurations and architectures
+is FID (Fréchet Inception Distance), computed in a custom classifier's feature
+space. This is implemented in eval_quality.py.
+
+--- Why FID? ---
+
+  - Reconstruction metrics (MSE, BCE, accuracy) measure how well the model can
+    reconstruct input data via mean-field, NOT how good its samples are. A model
+    with good reconstruction may still produce poor generative samples.
+  - PLL (pseudo log-likelihood) is an RBM-style approximation that ignores HH
+    couplings. For general (non-restricted) BMs, it's an imperfect proxy.
+  - FID directly measures the statistical similarity between generated samples
+    and real data in a learned feature space. Lower FID = better.
+
+--- Implementation ---
+
+eval_quality.py (~831 lines) provides:
+
+  MNISTQualityClassifier: A small CNN (3 conv layers: 1→16→32→64, stride 2,
+  AdaptiveAvgPool → 2×2, then fc 256→10). ~15K parameters. Achieves ~98%
+  accuracy on binarized 28×28 MNIST. Trains in ~4 seconds on GPU.
+  Cached to: data/mnist_quality_classifier.pt
+
+  FID computation pipeline:
+    1. Extract 256-dimensional features from the classifier's penultimate layer
+       for both real and generated images.
+    2. Apply PCA dimensionality reduction (fit on real features, project both).
+       Default: PCA-32 (reduce 256-d to 32-d). This is critical because FID has
+       a large positive bias when N_samples << feature_dim.
+    3. Compute FID = ||μ_r - μ_g||² + Tr(Σ_r + Σ_g - 2(Σ_r·Σ_g)^{1/2})
+       with ε-regularization on covariance diagonals (ε=1e-6).
+    4. Bootstrap confidence intervals (100 resamples, 95% CI by default).
+
+  Calibration (at N=400 samples, PCA-32):
+    - FID(real, real) ≈ 73    (bias floor — cannot go lower with this N)
+    - FID(real, noise) ≈ 9118 (ceiling — pure random binary noise)
+    - Dynamic range: ~125×
+    - BM-generated digits are expected in the 100–500 range.
+
+  Additional metrics per sampling method:
+    - Mean classifier confidence on generated samples
+    - Fraction of samples with confidence > threshold (default 0.8)
+    - Class balance entropy (are all 10 digits represented?)
+    - Per-class distribution
+
+  Batched sampling functions (used for evaluation, much faster than sequential):
+    - _gibbs_sample_batched(): All N chains in parallel via block Gibbs coloring.
+    - _sa_sample_batched(): Block Gibbs at annealed temperatures (inverse
+      temperature scales linearly). All N chains in parallel.
+    - _neal_sample(): Wrapper around BM_Neal_Sampler from bolmaqua.py. Builds
+      a BQM from the model and samples via neal's SimulatedAnnealingSampler.
+
+  Main entry point:
+    eval_samples_fullMNIST(model, real_data, ...) → structured dict with:
+      sampling_results: {method_name: {samples, fid, classifier, time_seconds}}
+      best_method: method with lowest FID
+      best_fid: the lowest FID value
+      real_features: cached for reuse
+      classifier: the trained classifier object
+
+  Supported methods: {"gibbs", "sa_batched", "sa_sequential", "neal"}
+  Neal-specific parameters: neal_num_sweeps (default 1000), neal_beta_range,
+  neal_seed.
+
+
+5. FULL-SCALE EXPERIMENT SCRIPTS
+================================================================================
+
+--- FULL-MNIST-test.py (712 lines) ---
+
+Single-run experiment script for full 28×28 MNIST. Configurable architecture
+and hyperparameters at the top of the file. Imports architecture functions from
+the ARCH scripts and evaluation from eval_quality.py.
+
+Workflow:
+  1. Config (architecture, K, training hyperparams, eval settings)
+  2. Data loading (full MNIST, binarized)
+  3. Zephyr graph generation Z(K)
+  4. Architecture construction (spectral / tiling / ilp / embedding)
+  5. Architecture analysis (VH/VV/HH edge counts, connectivity)
+  6. Training via PCD
+  7. Visual sampling (16 Gibbs + 16 SA samples, plotted)
+  8. Neal visual sampling (16 neal SA samples, plotted)
+  9. Quality evaluation via eval_samples_fullMNIST (FID + classifier metrics)
+     Uses 3 methods: gibbs, sa_batched, neal
+  10. Save model checkpoint + training curves + results text file
+
+Default config: K=7, lr=1e-3, wd=1e-5, bs=64, epochs=30, k_steps=15,
+                eval_num_samples=400, digit_filter=None (all 10 digits).
+
+--- FULL-MNIST-hyperparam-search.py (759 lines) ---
+
+Automated time-budgeted random hyperparameter search. Runs many trials, each
+with a different random config, and tracks the top-N by FID.
+
+Key design decisions:
+  - Architecture assignment caching:
+      * Tiling: All 3 valid patch sizes (2, 4, 7) pre-computed in-memory at
+        startup. Fully deterministic, so no reason to recompute.
+      * ILP: Solved ONCE with canonical parameters (α=1, β=1, γ=0.05) and
+        cached to data/ilp_canonical_assignment_K{K}.json. If no cache exists,
+        the solver runs for up to 1 hour. This is a one-time cost per K value.
+        The ILP architecture params are NOT part of the search space — only
+        training hyperparams are searched for ILP trials.
+      * Spectral: Recomputed each trial (random refinement swaps make caching
+        impractical, and it's fast).
+      * Embedding: All candidate (initial_grid_size, criterion) combinations
+        pre-computed at startup. Cached to disk like ILP. If embedding fails
+        for a given config (e.g., grid too large for Z(K)), that config is
+        skipped gracefully.
+  - Real data features (10K samples) are pre-computed once and reused across
+    all trials (avoiding re-running the classifier on real data every trial).
+  - The quality classifier is trained/loaded once at startup.
+
+Search space:
+  architecture:    {spectral, tiling, ilp, embedding}  (equal probability)
+  lr:              log-uniform [1e-5, 5e-3]
+  weight_decay:    log-uniform [1e-6, 1e-3]
+  batch_size:      {32, 64, 128, 256}
+  epochs:          {15, 20, 30, 40, 50}
+  k_steps:         {5, 10, 15, 20, 25}
+  persistent:      PCD (85%) vs CD (15%)
+  --- spectral-specific ---
+  refinement_iters:  {500, 1000, 2000}
+  vv_penalty:        log-uniform [1e-3, 0.1]
+  --- tiling-specific ---
+  patch_size:        {2, 4, 7}
+  --- embedding-specific ---
+  initial_grid_size: {6, 7, 8, 9}
+  add_node_criterion: {graph_distance, connectivity}
+
+CLI arguments:
+  --hours N          Time budget in hours (default: 8)
+  --max-trials N     Maximum trial count (default: 999)
+  --K N              Zephyr parameter (default: 7)
+  --top-n N          Track top-N results (default: 5)
+  --eval-samples N   Samples per method for FID (default: 400)
+  --seed N           Reproducibility seed
+  --resume PATH      Resume from existing leaderboard JSON
+
+Output:
+  - data/{timestamp}_hyperparam_best_results.json — leaderboard, updated after
+    every trial (atomic writes, safe to interrupt with Ctrl-C)
+  - data/hpsearch_{timestamp}_trial{N}_{arch}_{method}_model.pt — model
+    checkpoints for current top-N
+  - data/hpsearch_{timestamp}_trial{N}_{arch}_{method}.png — sample grids
+  - Models that fall out of the top-N are automatically deleted from disk
+
+To run:
+  python FULL-MNIST-hyperparam-search.py --hours 12 --max-trials 100
+
+
+6. FILE-BY-FILE DESCRIPTION
+================================================================================
+
+--- Core Library ---
+
+bolmaqua.py (~1368 lines)
+  The main library file. Contains everything needed to define, train, and sample
+  from a custom-architecture Boltzmann machine on the Zephyr graph.
+
+  Key classes:
+  - BoltzmannMachineGraph: Takes a NetworkX graph + node labels (visible/hidden),
+    generates adjacency masks (mask_vv, mask_hh, mask_vh) that define which
+    weight matrix entries are nonzero.
+  - CustomBoltzmannMachine(nn.Module): PyTorch model with:
+      * Three weight matrices: W_vv (visible-visible), W_hh (hidden-hidden),
+        W_vh (visible-hidden), each masked by the graph structure
+      * Biases b_v, b_h
+      * energy(v,h): computes E(v,h) = -½v'W_vv·v - ½h'W_hh·h - v'W_vh·h - b'v - b'h
+      * gibbs_sample_step(): single-site sequential Gibbs (GPU-optimized)
+      * gibbs_sample_step_with_coloring(): block Gibbs using graph coloring —
+        nodes of the same color are conditionally independent, so they can be
+        updated simultaneously. This is THE main sampling method used in training.
+      * mean_field_update(): deterministic sigmoid updates (used for positive phase)
+      * forward(): CD-k with mean-field positive phase + Gibbs negative phase
+
+  Key functions:
+  - graph_to_bm(G, node_labels): Factory — graph → BoltzmannMachineGraph → model
+  - train_boltzmann_machine_pcd(): PCD/CD training loop with:
+      * Persistent chains (maintained across epochs)
+      * PLL evaluation every epoch
+      * Reconstruction metrics (MSE, BCE, accuracy) every eval_every epochs
+      * Optional LR scheduler support (ReduceLROnPlateau)
+      * Returns dict with 8 metric lists (see training_history below)
+  - sample_from_bm(): Gibbs or SA sampling post-training
+  - BM_SimAnn_Sampler(): Simulated annealing with log-spaced temperature schedule
+  - BM_Neal_Sampler(): D-Wave neal SimulatedAnnealingSampler via dimod BQM.
+    Converts BM weights to a BinaryQuadraticModel (BINARY vartype), negating
+    coefficients so BQM minimization yields high-probability BM states.
+    Parameters: num_samples, num_sweeps (default 1000), beta_range, seed.
+    Returns CPU torch.Tensor of shape [num_samples, num_visible] with {0,1} values.
+  - tabu_search_bm(): Post-hoc local search to improve sample quality
+  - compute_pseudolikelihood(): PLL estimation on a batch
+  - evaluate_reconstruction(): MSE/BCE/accuracy via mean-field reconstruction
+  - get_zephyr_positions(): Get 2D layout positions from dwave_networkx
+  - assign_visibles_by_grid(): Greedy spatial assignment of visible nodes
+  - relabel_visible_first(): Relabel graph so visible=0..p-1, hidden=p..n-1
+  - generate_downsized_mnist_torchvision(): Create downsized MNIST .npy files
+  - fuse_hidden_nodes(): Contract low-degree hidden nodes (experimental)
+
+  Dependencies: torch, numpy, networkx, dwave_networkx, gcol (graph coloring),
+  skimage, torchvision, matplotlib, neal, dimod
+
+  Important note on free_energy(): The free_energy() function uses an RBM-style
+  approximation that ignores HH couplings. This means PLL computed from it is
+  an imperfect metric for general (non-restricted) BMs.
+
+  Important note on graph coloring: The graph coloring (via the `gcol` library)
+  is computed once at model construction and stored as self.coloring. It
+  partitions all nodes into color classes where no two same-colored nodes share
+  an edge. During block Gibbs sampling, all nodes of one color are updated
+  simultaneously as a vectorized batch operation. This is what makes training
+  tractable.
+
+--- Quality Evaluation ---
+
+eval_quality.py (~831 lines)
+  Sample quality evaluation module. See Section 4 for full details.
+
+  Key components:
+  - MNISTQualityClassifier: Small CNN for 28×28 binarized MNIST (256-d features)
+  - train_mnist_classifier(): Train or load cached classifier
+  - _compute_features(): Extract 256-d features from classifier
+  - _pca_reduce(): PCA dimensionality reduction (default 32-d)
+  - compute_fid(): Raw FID between two feature arrays
+  - compute_fid_with_ci(): FID + bootstrap confidence intervals + PCA
+  - compute_classifier_metrics(): Confidence, class balance, entropy
+  - _gibbs_sample_batched(): Parallel block Gibbs sampling (N chains at once)
+  - _sa_sample_batched(): Parallel SA with annealed block Gibbs
+  - eval_samples_fullMNIST(): Main entry point — sample, evaluate, return report
+
+  Cached artifact: data/mnist_quality_classifier.pt (~107 KB)
+
+--- Full-Scale Experiment Scripts ---
+
+FULL-MNIST-test.py (~712 lines)
+  Single-run full MNIST experiment. See Section 5 for details.
+
+FULL-MNIST-hyperparam-search.py (~759 lines)
+  Automated hyperparameter search. See Section 5 for details.
+
+--- Architecture Scripts (12×12 scale, also imported as libraries) ---
+
+ARCH1-spectral-bisection.py (~470 lines)
+  Self-contained script: loads data, constructs spectral bisection architecture,
+  trains BM, generates samples, saves model + figures.
+  Key functions: spectral_bisection_partition(), refine_partition_swaps(),
+  assign_pixel_order_spatial(), analyze_architecture()
+  These functions are imported by FULL-MNIST-test.py and the hyperparam search.
+
+ARCH2-hierarchical-tiling.py (~510 lines)
+  Self-contained script: loads data, constructs tiling architecture,
+  trains BM, generates samples, saves model + figures.
+  Key function: tiling_assignment() — does Voronoi tile assignment, rebalancing,
+  local-degree visible selection, and intra-tile pixel matching.
+
+ARCH3-ilp-bidirectional.py (~646 lines)
+  Self-contained script: loads data, solves ILP or uses greedy fallback,
+  trains BM, generates samples, saves model + figures.
+  Key functions: ilp_bidirectional_assignment() (SCIP ILP solver),
+  greedy_bidirectional_assignment() (swap-based fallback),
+  spectral_warm_start(), assign_pixel_order_spatial()
+  HAS_SCIP: Boolean flag indicating whether pyscipopt is available.
+
+ARCH4-embedding-chimera.py (~730 lines)
+  Self-contained script: embeds K_{p,p} into Z(K) via minorminer, breaks
+  chains, expands visible set, trains BM, generates samples.
+  Key functions: embedding_hybrid_assignment() (main pipeline — embed, break
+  chains, expand, cache), compute_initial_subgrid_positions(),
+  get_arch4_cache_path()
+  Parameterized: works for any K, grid_shape, initial_grid_size.
+  Returns (None, None) on embedding failure for graceful handling.
+  Cache: data/arch4_assignment_K{K}_{nrows}x{ncols}_init{igs}_{criterion}.json
+
+--- Validation Script ---
+
+test-RBM-as-custom-BM.py (~294 lines)
+  Sanity check: creates a complete bipartite graph (= RBM architecture) using
+  the CustomBoltzmannMachine framework. If this produces good samples after
+  training, the core BM code is working correctly. Uses 144 visible, 64 hidden.
+  This was an important validation step — if an RBM-as-custom-BM doesn't work,
+  something is wrong with the training/sampling implementation.
+
+--- Hyperparameter Search (older, 12×12 scale) ---
+
+RBM-hyperparameter-search.py (~607 lines)
+  Grid/random search over hyperparameters for the RBM-as-custom-BM test case.
+  Tests combinations of lr, k_steps, epochs, num_hidden, weight_decay.
+  Records PLL and sample quality. Results saved to hyperparam_opt_results_jan22.json.
+  Note: Superseded by FULL-MNIST-hyperparam-search.py for full-scale work.
+
+--- Optimization Helpers (older code) ---
+
+optihelper.py (~633 lines)
+  Utility functions for an earlier optimization approach (pre-ARCH scripts).
+  Contains: Zephyr layout analysis, pixel importance computation, pixel-to-node
+  heuristic assignment, graph preprocessing (edge node removal), hidden node
+  fusion logic, SCIP integration helpers, visualization tools.
+  Note: Much of this functionality has been superseded by the ARCH scripts,
+  but functions like analyze_zephyr_layout() and the fusion code may still be
+  useful.
+
+savehelper.py (~120 lines)
+  JSON serialization/deserialization for SCIP optimization results. Used by the
+  older K=3 and K≠3 notebook workflows. Functions:
+  - save_optimization_results(): Serialize SCIP solution to JSON
+  - load_optimization_results(): Deserialize back to Python dicts + NetworkX graphs
+
+--- Data Preparation ---
+
+make_mnist_12x12.py (~50 lines)
+  Older CSV-based script to downsize MNIST to 12×12. Superseded by
+  generate_downsized_mnist_torchvision() in bolmaqua.py (which uses torchvision
+  and supports arbitrary grid shapes).
+
+--- Graph Coloring Test ---
+
+graph_coloring_tests.py (~51 lines)
+  Quick test script for the gcol graph coloring library on Zephyr graphs.
+  Verifies that graph coloring works correctly and visualizes the coloring.
+
+--- GPU Optimization ---
+
+test_gpu_optimization.py
+  Benchmarking script for GPU-optimized Gibbs sampling. Tests vectorized vs.
+  sequential sampling performance.
+
+GPU_OPTIMIZATION_SUMMARY.md
+  Documentation of GPU optimizations applied to gibbs_sample_step():
+  pre-computed diagonal masks, in-place operations, optimized local field
+  computation. Reports 13-57× speedups for vectorized mode.
+
+--- Notebooks ---
+
+K=3_with_SCIP.ipynb
+  Interactive notebook for the K=3 Zephyr graph using SCIP optimization.
+  Older workflow that the ARCH3 script was partly inspired by.
+
+Trials_K!=3_Greedy.ipynb, Trials_k=3_no_post-processing.ipynb
+  Experimental notebooks for testing different K values and greedy approaches.
+
+gurobi_node_assignment.ipynb
+  Earlier experiment using Gurobi for the node assignment ILP (before switching
+  to SCIP/pyscipopt).
+
+--- LaTeX Document ---
+
+arch-methods-descriptions.tex
+  Full mathematical description of all three architecture methods. Sections:
+  1. Preliminaries (Zephyr graph, problem statement, pixel assignment)
+  2. Method 1: Spectral Bisection (Fiedler vector, partition, refinement)
+  3. Method 2: Hierarchical Tiling (tile construction, Voronoi, rebalancing)
+  4. Method 3: ILP Bidirectional (formulation, McCormick linearization)
+  5. Comparison of Methods (table of structural properties)
+  6. Scalability Analysis (custom BM vs RBM embedding on hardware)
+  7. Discussion
+  Self-contained, compilable with pdflatex.
+
+--- Data Files ---
+
+mnist12x12_*.npy, mnist13x13_*.npy: Pre-computed downsized binarized MNIST
+data/mnist_quality_classifier.pt: Trained quality classifier (~107 KB, ~98% acc)
+data/ilp_canonical_assignment_K{K}.json: Cached ILP node assignment per K value
+data/MNIST/raw/: Raw MNIST dataset files (for torchvision)
+data/*_hyperparam_best_results.json: Hyperparameter search leaderboard(s)
+data/hpsearch_*_model.pt: Model checkpoints from hyperparameter search
+data/arch{1,2,3}_*_model.pt: Model checkpoints from individual ARCH experiments
+mnist_trained_rbm/: Saved sklearn BernoulliRBM components (older experiment)
+Solutions_to_optimizations/: Saved SCIP solutions from earlier runs
+hyperparam_opt_results_jan22.json: Results from older RBM hyperparameter search
+
+--- Directories ---
+
+Current Best Code/: Snapshot of older "best" versions of core files
+  (bolmaqua.py, optihelper.py, savehelper.py, K=3 and K≠3 notebooks)
+Old_code_or_sample_tests/: Archived older experiments
+results/: Experiment output files
+__pycache__/: Python bytecode cache
+
+
+7. TRAINING HISTORY DICTIONARY
+================================================================================
+
+The train_boltzmann_machine_pcd() function returns a dict with these keys:
+  'pcd_loss'        — list of float, one per epoch (mean PCD loss)
+  'pll'             — list of float, one per epoch (pseudo log-likelihood)
+  'train_recon_mse' — list of float, every eval_every epochs (reconstruction MSE)
+  'train_recon_bce' — list of float, every eval_every epochs (reconstruction BCE)
+  'train_recon_acc' — list of float, every eval_every epochs (reconstruction accuracy)
+  'val_recon_mse'   — list of float, same schedule (empty if no val_data passed)
+  'val_recon_bce'   — list of float, same schedule
+  'val_recon_acc'   — list of float, same schedule
+
+For 100 epochs with eval_every=5, this is ~160 Python floats total (<2 KB).
+
+
+8. MODEL SAVE FORMAT
+================================================================================
+
+--- ARCH scripts (12×12 scale) ---
+
+Each ARCH script saves a .pt file to data/ containing:
+  'model_state_dict'  — PyTorch state dict (the trained weights & biases)
+  'training_history'  — the dict described above
+  'arch_name'         — e.g. "spectral", "tiling", "ilp"
+  'arch_label'        — e.g. "ARCH1: Spectral Bisection"
+  'hyperparams'       — dict of all hyperparameters used
+  'graph_edges'       — list of (u,v) tuples defining the relabeled graph
+  'node_labels'       — dict mapping node index → 'visible'/'hidden'
+
+Filename convention: arch{N}_{name}_{hparam_tag}_model.pt
+
+--- FULL-MNIST scripts (28×28 scale) ---
+
+FULL-MNIST-test.py saves .pt files with the same structure plus:
+  'quality_report'    — FID and classifier metrics from eval_samples_fullMNIST
+
+FULL-MNIST-hyperparam-search.py saves .pt files with:
+  'model_state_dict', 'training_history', 'arch_name', 'hyperparams',
+  'graph_edges', 'node_labels', 'quality_report'
+Filename convention: hpsearch_{timestamp}_trial{N}_{arch}_{PCD/CD}_lr..._fid..._model.pt
+
+--- How to reload a model ---
+
+  checkpoint = torch.load(path)
+  G = nx.Graph(); G.add_edges_from(checkpoint['graph_edges'])
+  for node, label in checkpoint['node_labels'].items():
+      G.add_node(node)  # ensure all nodes exist
+  model = graph_to_bm(G, checkpoint['node_labels'])
+  model.load_state_dict(checkpoint['model_state_dict'])
+
+
+9. KEY DEPENDENCIES
+================================================================================
+
+Python packages required:
+  torch (PyTorch)          — model, training, GPU compute
+  numpy                    — array operations
+  networkx                 — graph manipulation
+  dwave_networkx (dnx)     — Zephyr graph generation & layout
+  gcol                     — graph coloring for block Gibbs sampling
+  matplotlib               — plotting
+  scikit-image (skimage)   — image resizing for MNIST preprocessing
+  torchvision              — MNIST download + transforms
+  scipy                    — matrix square root for FID computation
+  neal                     — D-Wave simulated annealing sampler
+  dimod                    — D-Wave binary quadratic model (BQM) construction
+  pyscipopt (optional)     — SCIP solver for ARCH3 ILP; greedy fallback if absent
+  pandas                   — used in optihelper.py analysis functions
+
+Hardware: CUDA GPU recommended for training speed. CPU works but is much slower.
+The code auto-detects CUDA and sets device accordingly.
+
+Virtual environment: /home/kerger/code/venv/
+
+
+10. OPEN QUESTIONS AND NEXT STEPS
+================================================================================
+
+Active research questions:
+  1. Which of the three architectures produces the best generative model?
+     The hyperparameter search (FULL-MNIST-hyperparam-search.py) is the primary
+     tool for answering this. It searches across all three architectures and
+     ranks by FID.
+
+  2. How does K affect quality? Larger K gives more hidden nodes per visible,
+     which should help — but also increases training cost. K=7 is the current
+     default for 28×28 MNIST.
+
+  3. Can we actually sample these trained BMs on real D-Wave hardware?
+     Once a good architecture is found, the next step is running on Advantage2.
+     The neal sampler (BM_Neal_Sampler) provides the closest classical proxy
+     for D-Wave sampling — comparing neal FID vs. Gibbs/SA FID shows how the
+     D-Wave-style sampling path performs relative to classical alternatives.
+
+  4. What is the right objective for the node assignment? The ARCH3 ILP
+     optimizes a specific proxy (maximin VH-degree). Is this the right one?
+     Or does the tiling approach (ARCH2) with its local connectivity win
+     despite lower global VH count?
+
+  5. Block Gibbs correctness: The graph-coloring-based block Gibbs updates
+     all same-color nodes simultaneously. In a general (non-bipartite) BM,
+     same-color nodes may share indirect dependencies through VV/HH edges.
+     The coloring guarantees no direct edges within a color class, so the
+     conditional independence holds for one-step updates, but the mixing
+     properties may differ from single-site Gibbs. This is theoretically
+     sound but worth empirical validation.
+
+  6. FID interpretation: The current FID has a bias floor of ~73 at N=400
+     with PCA-32 (i.e., even real-vs-real gives FID≈73). Relative comparisons
+     are valid, but absolute FID values should not be compared to standard
+     ImageNet FID scores.
+
+Resolved since last summary:
+  - Training diagnostics: FID is now the primary metric, replacing reliance on
+    PCD loss and reconstruction metrics.
+  - Hyperparameter sensitivity: Systematic search is now automated via
+    FULL-MNIST-hyperparam-search.py.
+  - Scaling to full MNIST (28×28): Implemented and running via FULL-MNIST-test.py
+    and the hyperparameter search script.
+  - ILP canonical solve: Successfully completed and cached for K=7
+    (data/ilp_canonical_assignment_K7.json). All three architectures are
+    ready for the hyperparameter search.
+  - Hyperparameter search: Verified working end-to-end (Feb 13, 2026).
+
+
+11. HOW TO RUN
+================================================================================
+
+  # Activate the virtual environment
+  source /home/kerger/code/venv/bin/activate
+
+  # --- Full-scale experiments (28×28 MNIST, current focus) ---
+
+  # Single experiment (edit hyperparams at top of file):
+  python FULL-MNIST-test.py
+
+  # Automated hyperparameter search (recommended):
+  python FULL-MNIST-hyperparam-search.py --hours 12 --max-trials 100
+  python FULL-MNIST-hyperparam-search.py --hours 24 --K 7
+  python FULL-MNIST-hyperparam-search.py --resume data/YYYYMMDD_HHMMSS_hyperparam_best_results.json
+
+  # --- Small-scale experiments (12×12 MNIST, proof-of-concept) ---
+
+  python ARCH1-spectral-bisection.py
+  python ARCH2-hierarchical-tiling.py
+  python ARCH3-ilp-bidirectional.py
+
+  # --- Validation ---
+
+  python test-RBM-as-custom-BM.py
+
+  # --- Data generation (if .npy files don't exist) ---
+
+  python -c "from bolmaqua import generate_downsized_mnist_torchvision; generate_downsized_mnist_torchvision()"
+
+Each ARCH script runs end-to-end: architecture construction → training →
+sampling → saving. Outputs are printed to stdout and figures are saved as PNG.
+Trained models are saved to data/ with hyperparameter-tagged filenames.
+
+The hyperparameter search script is the primary workflow for finding good
+configurations. It handles architecture selection, training, evaluation, and
+result tracking automatically. The leaderboard JSON is updated after every
+trial, so results are safe even if the process is interrupted.
+
+================================================================================
+END OF SUMMARY
+================================================================================
