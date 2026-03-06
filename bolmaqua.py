@@ -1111,6 +1111,131 @@ def BM_SimAnn_Sampler(model: CustomBoltzmannMachine,
     return torch.stack(samples, dim=0)
 
 
+def BM_Neal_Sampler(model: CustomBoltzmannMachine,
+                    num_samples: int = 16,
+                    num_sweeps: int = 20,
+                    beta_range: tuple[float, float] | None = (0.1, 3.0),
+                    seed: int | None = None,
+                    verbose: bool = True) -> torch.Tensor:
+    """
+    Sample from a trained CustomBoltzmannMachine using D-Wave's Neal
+    SimulatedAnnealingSampler. This is the closest classical emulator of
+    the actual D-Wave quantum annealer sampling process.
+
+    The model's energy function (with {0,1} binary variables) is converted
+    to a dimod BinaryQuadraticModel (BINARY vartype) and then sampled with
+    neal.  Only the visible-unit values are returned.
+
+    Args:
+        model: Trained CustomBoltzmannMachine.
+        num_samples: Number of independent SA reads (num_reads).
+        num_sweeps: Number of sweeps per read (default 20).  Lower values
+            with a warm beta_range prevent all reads from collapsing to
+            the same energy minimum.
+        beta_range: (beta_start, beta_end) for the annealing schedule.
+            beta = 1/T, so low beta = hot, high beta = cold.
+            Default (0.1, 3.0) keeps the final temperature warm enough
+            for sample diversity.  If None, neal chooses automatically
+            (often too cold, producing identical samples).
+        seed: PRNG seed for reproducibility.
+        verbose: Print progress info.
+
+    Returns:
+        Tensor of shape [num_samples, model.num_visible] on CPU ({0,1} values).
+    """
+    import neal
+    import dimod
+
+    if verbose:
+        print(f"Running Neal SA sampler for {num_samples} samples "
+              f"({num_sweeps} sweeps)... 🧊")
+
+    model.eval()
+    with torch.no_grad():
+        W_vv, W_hh, W_vh = model._get_masked_weights()
+        W_vv = W_vv.cpu().numpy()
+        W_hh = W_hh.cpu().numpy()
+        W_vh = W_vh.cpu().numpy()
+        b_v = model.b_v.cpu().numpy()
+        b_h = model.b_h.cpu().numpy()
+
+    nv = model.num_visible
+    nh = model.num_hidden
+    n_total = nv + nh
+
+    # Build BQM with BINARY vartype.
+    # Our energy:  E = -0.5 v'W_vv v - 0.5 h'W_hh h - v'W_vh h - b_v'v - b_h'h
+    # BQM minimises:  E_bqm = sum_i a_i x_i + sum_{i<j} b_{ij} x_i x_j  (+ offset)
+    # So we negate everything to make the BQM energy = -E_model
+    # (i.e., low BQM energy = high Boltzmann probability).
+    #
+    # Variable labelling:  0..nv-1 = visible,  nv..nv+nh-1 = hidden.
+
+    linear = {}
+    quadratic = {}
+
+    # Visible biases  (negate: +b_v -> coefficient on x_i)
+    for i in range(nv):
+        linear[i] = -float(b_v[i])
+
+    # Hidden biases
+    for j in range(nh):
+        linear[nv + j] = -float(b_h[j])
+
+    # VV couplings (symmetric, stored upper triangle)
+    for i in range(nv):
+        for j in range(i + 1, nv):
+            w = float(W_vv[i, j])
+            if w != 0.0:
+                quadratic[(i, j)] = -w  # -(-0.5*2*w) = -w  (factor of 2 from symmetry, 0.5 cancels)
+
+    # HH couplings
+    for i in range(nh):
+        for j in range(i + 1, nh):
+            w = float(W_hh[i, j])
+            if w != 0.0:
+                quadratic[(nv + i, nv + j)] = -w
+
+    # VH couplings
+    for i in range(nv):
+        for j in range(nh):
+            w = float(W_vh[i, j])
+            if w != 0.0:
+                quadratic[(i, nv + j)] = -w
+
+    bqm = dimod.BinaryQuadraticModel(linear, quadratic, 0.0, vartype=dimod.BINARY)
+
+    if verbose:
+        print(f"  BQM: {bqm.num_variables} variables, {bqm.num_interactions} interactions")
+
+    # Run the sampler
+    sampler = neal.SimulatedAnnealingSampler()
+    kwargs = dict(num_reads=num_samples, num_sweeps=num_sweeps)
+    if beta_range is not None:
+        kwargs["beta_range"] = list(beta_range)
+    if seed is not None:
+        kwargs["seed"] = seed
+
+    sampleset = sampler.sample(bqm, **kwargs)
+
+    # Extract visible-unit values  (variables 0..nv-1)
+    records = sampleset.record
+    # sampleset.record.sample is shape (num_reads, num_variables)
+    # variable order matches sampleset.variables
+    var_list = list(sampleset.variables)
+    v_indices = [var_list.index(i) for i in range(nv)]
+
+    all_samples = sampleset.record.sample  # numpy array
+    visible_samples = all_samples[:, v_indices].astype(np.float32)
+
+    if verbose:
+        energies = records.energy
+        print(f"  Neal SA complete. Energy range: [{energies.min():.1f}, {energies.max():.1f}], "
+              f"mean={energies.mean():.1f}")
+
+    return torch.from_numpy(visible_samples)
+
+
 def sample_from_bm(model: CustomBoltzmannMachine, num_samples: int, burn_in_steps: int,
                    method: str = 'gibbs', annealing_schedule: list[float] | None = None, fused_pairs=None,
                    track_grad= False) -> torch.Tensor:

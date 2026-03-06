@@ -37,6 +37,7 @@ from bolmaqua import (
     train_boltzmann_machine_pcd,
     sample_from_bm,
     BM_SimAnn_Sampler,
+    BM_Neal_Sampler,
     device,
     get_zephyr_positions,
     relabel_visible_first,
@@ -71,6 +72,11 @@ greedy_bidirectional_assignment = _arch3.greedy_bidirectional_assignment
 assign_pixel_order_spatial_arch3 = _arch3.assign_pixel_order_spatial
 HAS_SCIP = _arch3.HAS_SCIP
 
+# ARCH4 functions
+_arch4 = import_module('ARCH4-embedding-hybrid')
+embedding_hybrid_assignment = _arch4.embedding_hybrid_assignment
+get_arch4_cache_path = _arch4.get_arch4_cache_path
+
 # Use ARCH1's analyze_architecture (identical across all ARCHs)
 analyze_architecture = _arch1.analyze_architecture
 
@@ -82,7 +88,7 @@ analyze_architecture = _arch1.analyze_architecture
 #%% 1. Config
 
 # ---- Architecture selection ----
-# Options: "spectral" (ARCH1), "tiling" (ARCH2), "ilp" (ARCH3)
+# Options: "spectral" (ARCH1), "tiling" (ARCH2), "ilp" (ARCH3), "embedding" (ARCH4)
 architecture = "spectral"
 
 # ---- Zephyr graph parameter ----
@@ -116,6 +122,7 @@ gibbs_burn_in = 2000
 sa_start_temp = 5.0
 sa_end_temp = 0.5
 sa_iterations = 64
+neal_num_sweeps = 20  # D-Wave Neal SA sweeps per read
 
 # ---- Sample Quality Evaluation ----
 eval_num_samples = 400       # samples per method for FID evaluation
@@ -124,7 +131,7 @@ eval_sa_start_temp = 5.0     # batched SA start temp for eval
 eval_sa_end_temp = 0.1       # batched SA end temp for eval
 eval_sa_iterations = 500     # batched SA temperature steps for eval
 eval_fid_bootstrap = 100     # bootstrap resamples for FID CI
-eval_sampling_methods = ["gibbs", "sa_batched"]  # methods to evaluate
+eval_sampling_methods = ["gibbs", "sa_batched", "neal"]  # methods to evaluate
 
 # ---- ARCH1-specific: Spectral Bisection ----
 refinement_iters = 1000
@@ -140,6 +147,10 @@ ilp_beta  = 1.0      # weight for min VH-degree of hidden nodes
 ilp_gamma = 0.01     # penalty per VV edge
 ilp_time_limit = 600  # seconds (larger graph needs more time)
 
+# ---- ARCH4-specific: Embedding-Based Hybrid ----
+initial_grid_size = 9    # side length of initial sub-grid (e.g. 9 for 9x9)
+add_node_criterion = 'graph_distance'  # 'graph_distance' or 'connectivity'
+
 
 # =============================================================================
 # Derived config & validation
@@ -154,7 +165,7 @@ if n_zephyr < num_visible:
     )
 
 # Validate architecture choice
-VALID_ARCHITECTURES = {"spectral", "tiling", "ilp"}
+VALID_ARCHITECTURES = {"spectral", "tiling", "ilp", "embedding"}
 if architecture not in VALID_ARCHITECTURES:
     raise ValueError(f"Unknown architecture '{architecture}'. Choose from: {VALID_ARCHITECTURES}")
 
@@ -172,6 +183,7 @@ ARCH_NAMES = {
     "spectral": ("spectral", "ARCH1: Spectral Bisection"),
     "tiling":   ("tiling",   "ARCH2: Hierarchical Tiling"),
     "ilp":      ("ilp",      "ARCH3: ILP Bidirectional"),
+    "embedding": ("embedding", "ARCH4: Embedding-Based Hybrid"),
 }
 ARCH_NAME, ARCH_LABEL = ARCH_NAMES[architecture]
 
@@ -188,6 +200,8 @@ elif architecture == "tiling":
     hparam_arch = f"_patch{patch_size}"
 elif architecture == "ilp":
     hparam_arch = f"_a{ilp_alpha}_b{ilp_beta}_g{ilp_gamma}"
+elif architecture == "embedding":
+    hparam_arch = f"_init{initial_grid_size}_crit{add_node_criterion}"
 
 hparam_tag = hparam_base + hparam_arch
 
@@ -221,6 +235,8 @@ elif architecture == "tiling":
 elif architecture == "ilp":
     print(f"  ARCH3 params: alpha={ilp_alpha}, beta={ilp_beta}, gamma={ilp_gamma}, time_limit={ilp_time_limit}s")
     print(f"  SCIP available: {HAS_SCIP}")
+elif architecture == "embedding":
+    print(f"  ARCH4 params: initial_grid_size={initial_grid_size}, criterion={add_node_criterion}")
 print(f"  Hparam tag: {hparam_tag}")
 print("=" * 70)
 
@@ -332,6 +348,23 @@ elif architecture == "ilp":
     print("Step 3: Spatial pixel assignment...")
     visible_in_pixel_order = assign_pixel_order_spatial_arch3(G_zephyr, visible_set, grid_shape)
     hidden_nodes = [n for n in sorted(G_zephyr.nodes()) if n not in visible_set]
+
+elif architecture == "embedding":
+    # ---- ARCH4: Embedding-Based Hybrid ----
+    print(f"\n--- ARCH4: Embedding-Based Hybrid (init={initial_grid_size}x{initial_grid_size}, "
+          f"criterion={add_node_criterion}) ---")
+    visible_in_pixel_order, hidden_nodes = embedding_hybrid_assignment(
+        G_zephyr, grid_shape,
+        initial_grid_size=initial_grid_size,
+        add_node_criterion=add_node_criterion,
+        K=K,
+        data_dir=data_dir,
+    )
+    if visible_in_pixel_order is None:
+        raise RuntimeError(
+            f"ARCH4 failed: could not embed K_{{{initial_grid_size**2},{initial_grid_size**2}}} "
+            f"into Z({K}). Try a smaller initial_grid_size or larger K."
+        )
 
 num_hidden = len(hidden_nodes)
 print(f"\nRelabeling graph (visible=0..{num_visible-1}, hidden={num_visible}..{num_visible+num_hidden-1})...")
@@ -562,7 +595,34 @@ plt.close(fig_sa)
 
 
 # =============================================================================
-# 8a. Comprehensive Sample Quality Evaluation (FID + Classifier metrics)
+# 8b. Sampling & Visualization (Neal / D-Wave SA)
+# =============================================================================
+
+print(f"\nGenerating {num_samples} Neal SA samples (sweeps={neal_num_sweeps})...")
+neal_samples = BM_Neal_Sampler(
+    model=model,
+    num_samples=num_samples,
+    num_sweeps=neal_num_sweeps,
+    verbose=True,
+)
+neal_np = neal_samples.cpu().detach().numpy()
+
+fig_neal, axes_neal = plt.subplots(nrows_plot, ncols_plot, figsize=(2 * ncols_plot, 2 * nrows_plot))
+fig_neal.suptitle(f"Full MNIST {ARCH_LABEL} — Neal SA Samples (K={K}, Ep={epochs}, H={num_hidden})")
+for i, ax in enumerate(axes_neal.flat):
+    if i < len(neal_np):
+        ax.imshow(neal_np[i].reshape(grid_shape), cmap='gray', vmin=0, vmax=1)
+    ax.axis('off')
+plt.tight_layout()
+neal_path = os.path.join(data_dir, f"{file_prefix}_{hparam_tag}{digit_tag}_samples_neal.png")
+plt.savefig(neal_path, dpi=150)
+plt.savefig(f"{file_prefix}_samples_neal.png", dpi=150)
+print(f"Saved Neal SA samples to {neal_path}")
+plt.close(fig_neal)
+
+
+# =============================================================================
+# 8c. Comprehensive Sample Quality Evaluation (FID + Classifier metrics)
 # =============================================================================
 
 print(f"\n{'='*70}")
@@ -581,6 +641,7 @@ quality_report = eval_samples_fullMNIST(
     sa_start_temp=sa_start_temp,
     sa_end_temp=sa_end_temp,
     sa_iterations=sa_iterations,
+    neal_num_sweeps=neal_num_sweeps,
     sampling_methods=eval_sampling_methods,
     n_fid_bootstrap=eval_fid_bootstrap,
     verbose=True,

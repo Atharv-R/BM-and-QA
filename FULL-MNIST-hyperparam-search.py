@@ -73,6 +73,10 @@ greedy_bidirectional_assignment = _arch3.greedy_bidirectional_assignment
 assign_pixel_order_spatial_arch3 = _arch3.assign_pixel_order_spatial
 HAS_SCIP = _arch3.HAS_SCIP
 
+_arch4 = import_module("ARCH4-embedding-hybrid")
+embedding_hybrid_assignment = _arch4.embedding_hybrid_assignment
+get_arch4_cache_path = _arch4.get_arch4_cache_path
+
 
 # =============================================================================
 # CLI Arguments
@@ -83,8 +87,8 @@ parser.add_argument("--hours", type=float, default=8.0,
                     help="Time budget in hours (default: 8)")
 parser.add_argument("--max-trials", type=int, default=999,
                     help="Maximum number of trials (default: 999)")
-parser.add_argument("--K", type=int, default=7,
-                    help="Zephyr graph parameter K (default: 7)")
+parser.add_argument("--K", type=int, default=8,
+                    help="Zephyr graph parameter K (default: 8)")
 parser.add_argument("--top-n", type=int, default=5,
                     help="Number of best configs to track (default: 5)")
 parser.add_argument("--eval-samples", type=int, default=400,
@@ -111,8 +115,14 @@ EVAL_NUM_SAMPLES = args.eval_samples
 TIME_BUDGET_SECONDS = args.hours * 3600
 MAX_TRIALS = args.max_trials
 
-# Eval: use both Gibbs and batched SA
-EVAL_METHODS = ["gibbs", "sa_batched"]
+# Eval: use Gibbs, batched SA, and Neal (D-Wave SA emulator)
+EVAL_METHODS = ["gibbs", "sa_batched", "neal"]
+
+# Architecture pool — only these will be sampled and pre-computed
+# Change this list to control which architectures are searched over.
+#ARCH_POOL = ["spectral", "tiling", "ilp", "embedding"]  # all four
+ARCH_POOL = ["spectral", "tiling", "embedding"]
+
 
 # Validate K
 if N_ZEPHYR < NUM_VISIBLE:
@@ -143,14 +153,14 @@ def sample_hyperparams() -> dict:
 
     Returns a dict with all params needed to run one trial.
     """
-    # Architecture (equal probability across all three)
-    architecture = random.choice(["spectral", "tiling", "ilp"])
+    # Architecture (sampled from ARCH_POOL)
+    architecture = random.choice(ARCH_POOL)
 
-    # Learning rate: log-uniform from 1e-5 to 5e-3
-    lr = 10 ** random.uniform(-5, np.log10(5e-3))
+    # Learning rate: log-uniform from 1e-5 to 1e-2
+    lr = 10 ** random.uniform(-5, -2)
 
-    # Weight decay: log-uniform from 1e-6 to 1e-3
-    weight_decay = 10 ** random.uniform(-6, -3)
+    # Weight decay: log-uniform from 1e-8 to 1e-5
+    weight_decay = 10 ** random.uniform(-8, -5)
 
     # Batch size: from a set of powers of 2
     batch_size = random.choice([32, 64, 128, 256])
@@ -189,6 +199,10 @@ def sample_hyperparams() -> dict:
 
     elif architecture == "ilp":
         pass  # ILP uses a single pre-solved canonical assignment (no arch params to tune)
+
+    elif architecture == "embedding":
+        config["initial_grid_size"] = random.choice([8, 9, 10])
+        config["add_node_criterion"] = random.choice(["graph_distance", "connectivity"])
 
     return config
 
@@ -252,17 +266,22 @@ print(f"  Nodes: {G_zephyr.number_of_nodes()}, Edges: {G_zephyr.number_of_edges(
 _arch_assignment_cache = {}  # key -> (visible_in_pixel_order, hidden_nodes)
 
 # --- Tiling: pre-compute for all patch sizes ---
-print("\nPre-computing tiling assignments...")
-for _ps in [2, 4, 7]:
-    _t0 = time.time()
-    _vis, _hid = tiling_assignment(G_zephyr, GRID_SHAPE, _ps)
-    _arch_assignment_cache[f"tiling_patch{_ps}"] = (_vis, _hid)
-    print(f"  patch_size={_ps}: {len(_hid)} hidden nodes  ({time.time()-_t0:.1f}s)")
+if "tiling" in ARCH_POOL:
+    print("\nPre-computing tiling assignments...")
+    for _ps in [2, 4, 7]:
+        _t0 = time.time()
+        _vis, _hid = tiling_assignment(G_zephyr, GRID_SHAPE, _ps)
+        _arch_assignment_cache[f"tiling_patch{_ps}"] = (_vis, _hid)
+        print(f"  patch_size={_ps}: {len(_hid)} hidden nodes  ({time.time()-_t0:.1f}s)")
+else:
+    print("\nSkipping tiling pre-computation (not in ARCH_POOL)")
 
 # --- ILP: solve once with canonical params, cache to disk ---
 ILP_CACHE_PATH = os.path.join(DATA_DIR, f"ilp_canonical_assignment_K{K}.json")
 
-if os.path.exists(ILP_CACHE_PATH):
+if "ilp" not in ARCH_POOL:
+    print("\nSkipping ILP pre-computation (not in ARCH_POOL)")
+elif os.path.exists(ILP_CACHE_PATH):
     print(f"\nLoading cached ILP assignment from {ILP_CACHE_PATH}...")
     with open(ILP_CACHE_PATH, "r") as f:
         _ilp_data = json.load(f)
@@ -279,14 +298,14 @@ else:
     if HAS_SCIP:
         _ilp_visible_set, _ilp_info = ilp_bidirectional_assignment(
             G_zephyr, NUM_VISIBLE,
-            alpha=1.0, beta=1.0, gamma=0.01,
+            alpha=1.0, beta=1.0, gamma=0.05,
             time_limit=3600,  # 1 hour
             warm_start_set=_warm_start,
         )
     if _ilp_visible_set is None:
         print("  ILP returned no solution (or SCIP unavailable), falling back to greedy...")
         _ilp_visible_set = greedy_bidirectional_assignment(
-            G_zephyr, NUM_VISIBLE, gamma=0.01
+            G_zephyr, NUM_VISIBLE, gamma=0.05
         )
     _ilp_vis = assign_pixel_order_spatial_arch3(G_zephyr, _ilp_visible_set, GRID_SHAPE)
     _ilp_hid = [n for n in sorted(G_zephyr.nodes()) if n not in _ilp_visible_set]
@@ -299,14 +318,48 @@ else:
             "K": K,
             "num_visible": NUM_VISIBLE,
             "grid_shape": list(GRID_SHAPE),
-            "solver_params": {"alpha": 1.0, "beta": 1.0, "gamma": 0.01, "time_limit": 3600},
+            "solver_params": {"alpha": 1.0, "beta": 1.0, "gamma": 0.05, "time_limit": 3600},
         }, f, indent=2)
     print(f"  Saved ILP assignment to {ILP_CACHE_PATH}")
     _arch_assignment_cache["ilp_canonical"] = (_ilp_vis, _ilp_hid)
 
+# --- Embedding (ARCH4): pre-compute for all candidate initial_grid_sizes ---
+if "embedding" not in ARCH_POOL:
+    print("\nSkipping embedding pre-computation (not in ARCH_POOL)")
+else:
+    print("\nPre-computing embedding (ARCH4) assignments...")
+    _embedding_grid_sizes = [8, 9]
+    _embedding_criteria = ["graph_distance", "connectivity"]
+    for _igs in _embedding_grid_sizes:
+        for _crit in _embedding_criteria:
+            _cache_key = f"embedding_init{_igs}_{_crit}"
+            _cache_path = get_arch4_cache_path(K, GRID_SHAPE, _igs, _crit, DATA_DIR)
+            if os.path.exists(_cache_path):
+                with open(_cache_path, "r") as f:
+                    _emb_data = json.load(f)
+                _emb_vis = _emb_data["visible_in_pixel_order"]
+                _emb_hid = _emb_data["hidden_nodes"]
+                _arch_assignment_cache[_cache_key] = (_emb_vis, _emb_hid)
+                print(f"  init={_igs}, {_crit}: loaded from cache ({len(_emb_hid)} hidden)")
+            else:
+                _t0 = time.time()
+                _emb_vis, _emb_hid = embedding_hybrid_assignment(
+                    G_zephyr, GRID_SHAPE,
+                    initial_grid_size=_igs,
+                    add_node_criterion=_crit,
+                    K=K,
+                    data_dir=DATA_DIR,
+                )
+                if _emb_vis is not None:
+                    _arch_assignment_cache[_cache_key] = (_emb_vis, _emb_hid)
+                    print(f"  init={_igs}, {_crit}: computed ({len(_emb_hid)} hidden, {time.time()-_t0:.1f}s)")
+                else:
+                    print(f"  init={_igs}, {_crit}: embedding FAILED — will skip this config")
+
 print(f"\nArchitecture assignments cached:")
 print(f"  Tiling: 3 configs (patch_size=2,4,7)")
 print(f"  ILP: 1 canonical config")
+print(f"  Embedding: {sum(1 for k in _arch_assignment_cache if k.startswith('embedding_'))} configs")
 print(f"  Spectral: computed per trial (random refinement)")
 
 
@@ -383,6 +436,16 @@ def build_architecture(config: dict, G: nx.Graph):
     elif arch == "ilp":
         visible_in_pixel_order, hidden_nodes = _arch_assignment_cache["ilp_canonical"]
 
+    elif arch == "embedding":
+        cache_key = f"embedding_init{config['initial_grid_size']}_{config['add_node_criterion']}"
+        if cache_key not in _arch_assignment_cache:
+            # Not pre-cached (embedding failed during pre-computation)
+            raise RuntimeError(
+                f"Embedding assignment not available for init={config['initial_grid_size']}, "
+                f"criterion={config['add_node_criterion']}. Embedding likely failed for this config."
+            )
+        visible_in_pixel_order, hidden_nodes = _arch_assignment_cache[cache_key]
+
     num_hidden = len(hidden_nodes)
 
     G_relabeled, mapping = relabel_visible_first(G, visible_in_pixel_order)
@@ -444,6 +507,8 @@ def run_trial(
         print(f"  patch_size={config['patch_size']}")
     elif arch == "ilp":
         print(f"  (using pre-solved canonical assignment)")
+    elif arch == "embedding":
+        print(f"  init_grid={config['initial_grid_size']}, criterion={config['add_node_criterion']}")
     print(f"{'='*70}")
 
     trial_start = time.time()
@@ -498,9 +563,9 @@ def run_trial(
             num_samples=EVAL_NUM_SAMPLES,
             classifier=classifier,
             gibbs_burn_in=2000,
-            batched_sa_start_temp=5.0,
+            batched_sa_start_temp=10.0,
             batched_sa_end_temp=0.1,
-            batched_sa_iterations=500,
+            batched_sa_iterations=20,
             sampling_methods=EVAL_METHODS,
             n_fid_bootstrap=100,
             real_features_cache=real_features_cache,
@@ -750,6 +815,9 @@ def main():
                 print(f"    patch={entry['config']['patch_size']}")
             elif arch == "ilp":
                 print(f"    (pre-solved canonical assignment)")
+            elif arch == "embedding":
+                print(f"    init_grid={entry['config']['initial_grid_size']}, "
+                      f"criterion={entry['config']['add_node_criterion']}")
             print(f"    Model: {entry['model_path']}")
 
     print(f"\nDone. Results saved to {leaderboard_path}")

@@ -66,3 +66,6 @@ test_gpu_optimization.py
 .gitignore
 rbm_test_samples.png
 .gitignore
+agent_memory.txt
+.gitignore
+.gitignore

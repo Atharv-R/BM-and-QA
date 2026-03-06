@@ -106,6 +106,11 @@ def train_mnist_classifier(
     """
     Train (or load from cache) the 10-class MNIST classifier on binarized data.
 
+    If the cached checkpoint contains a 'config' key (from the classifier
+    hyperparameter search), a FlexibleMNISTClassifier is loaded instead of
+    the default MNISTQualityClassifier. Both expose the same .features() and
+    .forward() interface.
+
     Returns the trained classifier on `device`, in eval mode.
     """
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -113,11 +118,20 @@ def train_mnist_classifier(
     # Check for cached model
     if os.path.exists(save_path) and not force_retrain:
         print(f"[eval_quality] Loading cached classifier from {save_path}")
-        clf = MNISTQualityClassifier().to(device)
-        state = torch.load(save_path, map_location=device, weights_only=True)
-        clf.load_state_dict(state["model_state_dict"])
+        state = torch.load(save_path, map_location=device, weights_only=False)
+        if 'config' in state:
+            # Flexible classifier from hyperparameter search
+            from classifier_hyperparam_search import FlexibleMNISTClassifier
+            clf = FlexibleMNISTClassifier(state['config']).to(device)
+            clf.load_state_dict(state['model_state_dict'])
+            print(f"  Loaded FlexibleMNISTClassifier (feature_dim={clf.feature_dim}, "
+                  f"acc={state.get('test_accuracy', '?')})")
+        else:
+            # Original fixed classifier
+            clf = MNISTQualityClassifier().to(device)
+            clf.load_state_dict(state['model_state_dict'])
+            print(f"  Cached classifier accuracy: {state.get('test_accuracy', '?')}")
         clf.eval()
-        print(f"  Cached classifier accuracy: {state.get('test_accuracy', '?')}")
         return clf
 
     print("[eval_quality] Training MNIST quality classifier...")
@@ -578,6 +592,36 @@ def _sa_sample_batched(model, num_samples: int, start_temp: float, end_temp: flo
     return best_v.detach()
 
 
+def _neal_sample(model, num_samples: int, num_sweeps: int = 100,
+                 beta_range: tuple[float, float] | None = (0.01, 10.0),
+                 seed: int | None = None,
+                 verbose: bool = True) -> torch.Tensor:
+    """
+    num_sweeps=100,
+    beta_range=(0.01, 10.0) was good in RBM case. 
+    Maybe not in general, but good to start with. 
+
+    Delegates to BM_Neal_Sampler in bolmaqua.  This thin wrapper exists
+    so that eval_samples_fullMNIST can call it with a uniform interface.
+
+    Args:
+        model: Trained CustomBoltzmannMachine.
+        num_samples: Number of SA reads.
+        num_sweeps: Number of sweeps per read.
+        beta_range: Optional (beta_start, beta_end).
+        seed: PRNG seed.
+        verbose: Print progress.
+
+    Returns:
+        (num_samples, num_visible) tensor on CPU.
+    """
+    from bolmaqua import BM_Neal_Sampler
+    return BM_Neal_Sampler(
+        model, num_samples=num_samples, num_sweeps=num_sweeps,
+        beta_range=beta_range, seed=seed, verbose=verbose,
+    )
+
+
 # =====================================================================
 # 5.  Main evaluation function
 # =====================================================================
@@ -590,15 +634,19 @@ def eval_samples_fullMNIST(
     classifier: MNISTQualityClassifier | None = None,
     classifier_path: str = _DEFAULT_CLASSIFIER_PATH,
     # Gibbs parameters
-    gibbs_burn_in: int = 2000,
+    gibbs_burn_in: int = 3000,
     # SA parameters (sequential, original implementation)
     sa_start_temp: float = 5.0,
     sa_end_temp: float = 0.5,
     sa_iterations: int = 64,
     # Batched SA parameters (block Gibbs-based, fast)
-    batched_sa_start_temp: float = 5.0,
-    batched_sa_end_temp: float = 0.1,
+    batched_sa_start_temp: float = 10.0,
+    batched_sa_end_temp: float = 0.2,
     batched_sa_iterations: int = 500,
+    # Neal (D-Wave) SA parameters
+    neal_num_sweeps: int = 20,
+    neal_beta_range: tuple[float, float] | None = (0.1, 5.0),
+    neal_seed: int | None = None,
     # Sampling methods to run
     sampling_methods: list[str] | None = None,
     # FID parameters
@@ -632,10 +680,15 @@ def eval_samples_fullMNIST(
             Parameters for the fast batched SA sampler. Uses block Gibbs at
             annealed temperatures.
 
+        neal_num_sweeps: Number of sweeps for the Neal SA sampler.
+        neal_beta_range: Optional inverse-temperature range for Neal SA.
+        neal_seed: PRNG seed for Neal SA reproducibility.
+
         sampling_methods: List of methods to run. Options:
             - "gibbs": Batched block Gibbs sampling (fast)
             - "sa_batched": Batched SA with block Gibbs updates (fast, recommended)
             - "sa_sequential": Original sequential SA (slow, for comparison)
+            - "neal": D-Wave Neal SimulatedAnnealingSampler (closest to real QA)
             Default: ["gibbs", "sa_batched"]
 
         n_fid_bootstrap: Number of bootstrap resamples for FID CI.
@@ -666,7 +719,7 @@ def eval_samples_fullMNIST(
     if sampling_methods is None:
         sampling_methods = ["gibbs", "sa_batched"]
 
-    valid_methods = {"gibbs", "sa_batched", "sa_sequential"}
+    valid_methods = {"gibbs", "sa_batched", "sa_sequential", "neal"}
     for m in sampling_methods:
         if m not in valid_methods:
             raise ValueError(f"Unknown sampling method '{m}'. Valid: {valid_methods}")
@@ -722,6 +775,14 @@ def eval_samples_fullMNIST(
                 max_iterations=sa_iterations,
                 num_samples=num_samples,
                 track_best=True,
+                verbose=verbose)
+
+        elif method == "neal":
+            samples = _neal_sample(
+                model, num_samples=num_samples,
+                num_sweeps=neal_num_sweeps,
+                beta_range=neal_beta_range,
+                seed=neal_seed,
                 verbose=verbose)
 
         sample_time = time.time() - t0

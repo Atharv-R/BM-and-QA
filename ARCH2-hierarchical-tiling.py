@@ -31,6 +31,7 @@ from bolmaqua import (
     train_boltzmann_machine_pcd,
     sample_from_bm,
     BM_SimAnn_Sampler,
+    BM_Neal_Sampler,
     GRID_SHAPE,
     device,
     get_zephyr_positions,
@@ -300,6 +301,7 @@ if __name__ == '__main__':
     sa_start_temp = 10.0
     sa_end_temp = 0.1
     sa_iterations = 16
+    neal_num_sweeps = 20
 
     # Strategy-specific
     patch_size = 3  # 3x3 patches → 4x4=16 tiles for 12x12 image; each tile has 9 pixels
@@ -509,6 +511,29 @@ if __name__ == '__main__':
     plt.savefig(f"arch2_{ARCH_NAME}_samples_sa.png")
     plt.savefig(os.path.join(data_dir, f"arch2_{ARCH_NAME}_{hparam_tag}_samples_sa.png"))
     print(f"Saved SA samples to arch2_{ARCH_NAME}_samples_sa.png")
+    plt.show()
+
+    #%% 9. Sampling & Visualization (Neal / D-Wave SA)
+
+    print(f"\nGenerating {num_samples} Neal SA samples (sweeps={neal_num_sweeps})...")
+    neal_samples = BM_Neal_Sampler(
+        model=model,
+        num_samples=num_samples,
+        num_sweeps=neal_num_sweeps,
+        verbose=True,
+    )
+    neal_np = neal_samples.cpu().detach().numpy()
+
+    fig_neal, axes_neal = plt.subplots(3, 3, figsize=(8, 8))
+    fig_neal.suptitle(f"{ARCH_LABEL} — Neal SA Samples (Epochs={epochs}, Hidden={num_hidden})")
+    for i, ax in enumerate(axes_neal.flat):
+        if i < len(neal_np):
+            ax.imshow(neal_np[i].reshape(grid_shape), cmap='gray', vmin=0, vmax=1)
+        ax.axis('off')
+    plt.tight_layout()
+    plt.savefig(f"arch2_{ARCH_NAME}_samples_neal.png")
+    plt.savefig(os.path.join(data_dir, f"arch2_{ARCH_NAME}_{hparam_tag}_samples_neal.png"))
+    print(f"Saved Neal SA samples to arch2_{ARCH_NAME}_samples_neal.png")
     plt.show()
 
     print(f"\n{ARCH_LABEL} — Complete.")
