@@ -36,6 +36,8 @@ from bolmaqua import (
     relabel_visible_first,
 )
 
+from optihelper import visualize_node_assignment_on_zephyr
+
 ARCH_NAME = "spectral"
 ARCH_LABEL = "ARCH1: Spectral Bisection"
 
@@ -323,6 +325,9 @@ if __name__ == '__main__':
     visible_relabeled = list(range(num_visible))
     hidden_relabeled = list(range(num_visible, num_visible + num_hidden))
     stats = analyze_architecture(G_relabeled, visible_relabeled, hidden_relabeled, ARCH_LABEL)
+
+    visualize_node_assignment_on_zephyr(G_relabeled, visible_relabeled, hidden_relabeled, 
+                                    title="Final Assignment (Red=Visible, Blue=Hidden)")
 
     #%% 5. Model Initialization
 
