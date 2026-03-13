@@ -48,7 +48,7 @@ from eval_quality import (
 )
 
 from classifierhelper import (
-    add_label_nodes_to_graph,
+    build_native_labelled_graph,
     prepare_classification_batch,
     train_classifier_bm,
     classify_images_fast,
@@ -98,7 +98,7 @@ architecture = "tiling"
 # Z(6) = 1248 nodes; Z(7) = 1680; Z(8) = 2176
 # For 28x28 MNIST (784 visible), need K >= 5 (Z(5)=880, only 96 hidden)
 # K=6 recommended: 1248 nodes → 784 visible + 464 hidden
-K = 7
+K = 12
 
 # ---- Image configuration ----
 grid_shape = (28, 28)  # Full MNIST
@@ -112,7 +112,11 @@ digit_filter = None  # Use all 10 digits
 # ---- Classification Mode ----
 # Set to True to train discriminative BM for classification instead of generation
 use_classification = True  # Set False for generative mode (original behavior)
-nodes_per_label = 3  # how many nodes represent each label
+nodes_per_label = 5  # how many nodes represent each label
+classification_loss_weight = 5.0
+classification_inference_method = "free_energy"  # QA-compatible class scoring
+label_coverage_mode = "hidden_visible"  # or "hidden_only"
+label_assignment_time_limit = 120.0  # seconds for native label-node assignment
 
 # Determine num_classes based on digit_filter
 if digit_filter is None:
@@ -127,12 +131,16 @@ total_label_nodes = num_classes * nodes_per_label  # ← Total label nodes neede
 
 print(f"Classification: num_classes={num_classes}, nodes_per_label={nodes_per_label}, "
       f"total_label_nodes={total_label_nodes}")
+print(f"Classification config: loss_weight={classification_loss_weight}, "
+    f"inference_method={classification_inference_method}")
+print(f"Label assignment: native nodes, coverage_mode={label_coverage_mode}, "
+    f"time_limit={label_assignment_time_limit}s")
 
 # ---- Training hyperparameters ----
-lr = 5e-3
+lr = 1e-3
 weight_decay = 0.00001  # L2 regularization (Adam weight_decay)
 batch_size = 64
-epochs = 1 
+epochs = 10 
 k_steps = 5
 persistent_chains = True
 eval_every = 3
@@ -143,6 +151,14 @@ gibbs_burn_in = 2000
 sa_start_temp = 5.0
 sa_end_temp = 0.5
 sa_iterations = 64
+
+# ---- QA-like Classification Estimate (Neal) ----
+qa_estimate_enabled = True
+qa_estimate_num_test_images = 128
+qa_estimate_num_reads = 64
+qa_estimate_num_sweeps = 100
+qa_estimate_beta_range = (0.1, 3.0)
+qa_estimate_seed = 42
 
 # ---- Sample Quality Evaluation ----
 eval_num_samples = 400       # samples per method for FID evaluation
@@ -241,6 +257,8 @@ print(f"  Grid shape: {grid_shape} ({num_visible} visible units)")
 print(f"  Digits: {digits_str}")
 print(f"  Training: lr={lr}, l2={weight_decay}, epochs={epochs}, k={k_steps}, bs={batch_size}")
 print(f"  Method: {train_method}")
+print(f"  QA estimate: enabled={qa_estimate_enabled}, eval_images={qa_estimate_num_test_images}, "
+    f"reads={qa_estimate_num_reads}, sweeps={qa_estimate_num_sweeps}")
 if architecture == "spectral":
     print(f"  ARCH1 params: refinement_iters={refinement_iters}, vv_penalty={vv_penalty}")
 elif architecture == "tiling":
@@ -393,27 +411,38 @@ print(f"Architecture construction time: {t_arch:.1f}s")
 visible_relabeled = list(range(num_visible))
 hidden_relabeled = list(range(num_visible, num_visible + num_hidden))
 
+# Analyze the base pixel/hidden partition before native label reassignment.
+stats = analyze_architecture(
+    G_relabeled,
+    visible_relabeled,
+    hidden_relabeled,
+    f"{ARCH_LABEL} (base partition)"
+)
+
 # =============================================================================
 # 4a. Add Label Nodes for Classification (if enabled)
 # =============================================================================
 
-label_nodes = None  # Will be set if classification mode
-
-print(f"\n--- Adding Label Nodes for Classification ---")
-G_relabeled, label_node_groups, node_labels = add_label_nodes_to_graph(
-    G_relabeled, visible_relabeled, hidden_relabeled, 
-    num_classes=num_classes,
-    nodes_per_label=nodes_per_label
+print(f"\n--- Selecting Native Label Nodes for Classification ---")
+G_relabeled, label_node_groups, hidden_relabeled, node_labels, label_assignment_stats, _ = (
+    build_native_labelled_graph(
+        G_relabeled,
+        visible_relabeled,
+        hidden_relabeled,
+        num_classes=num_classes,
+        nodes_per_label=nodes_per_label,
+        coverage_mode=label_coverage_mode,
+        time_limit_seconds=label_assignment_time_limit,
+        seed=42,
+        verbose=True,
+    )
 )
 
-# Update visible/hidden counts (label nodes are now visible too)
-num_visible_total = num_visible + num_classes  # pixels + labels
-print(f"  Extended visible units: {num_visible_total} (pixels={num_visible}, labels={num_classes})")
-print(f"  Label node IDs: {label_nodes}")
-
-# Analyze only pixel-to-hidden connections (exclude label nodes)
-stats = analyze_architecture(G_relabeled, visible_relabeled, hidden_relabeled, 
-                                 f"{ARCH_LABEL} (pixels only)")
+num_visible_total = num_visible + total_label_nodes
+num_hidden = len(hidden_relabeled)
+print(f"  Extended visible units: {num_visible_total} (pixels={num_visible}, labels={total_label_nodes})")
+print(f"  Native label node groups: {label_node_groups}")
+print(f"  Remaining hidden nodes: {num_hidden}")
 
 
 # =============================================================================
@@ -425,7 +454,7 @@ model = graph_to_bm(G_relabeled, node_labels)
 model.to(device)
 total_params = sum(p.numel() for p in model.parameters())
 print(f"Model on {device}, total parameters: {total_params:,}")
-print(f"  Visible: {num_visible}, Hidden: {num_hidden}")
+print(f"  Visible: {num_visible_total}, Hidden: {num_hidden}")
 
 
 # =============================================================================
@@ -441,7 +470,8 @@ training_history = train_classifier_bm(
     label_node_groups=label_node_groups,
     batch_size=batch_size, step_size=lr, 
     num_classes=num_classes,
-    nodes_per_label=nodes_per_label 
+    nodes_per_label=nodes_per_label,
+    classification_loss_weight=classification_loss_weight,
 )
 
 # =============================================================================
@@ -454,24 +484,28 @@ print(f"\n{'='*70}")
 print("  CLASSIFICATION EVALUATION")
 print(f"{'='*70}")
 
-train_acc, train_per_class = evaluate_classifier(
-    model, 
-    DataLoader(train_dataset_final, batch_size=batch_size, shuffle=False),
-    label_node_groups,
-    num_gibbs_steps=10,
-    num_classes=num_classes,
-    nodes_per_label=nodes_per_label, 
-    aggregation=aggregation_method  
-)
+model.eval()
+with torch.inference_mode():
+    train_acc, train_per_class = evaluate_classifier(
+        model, 
+        DataLoader(train_dataset_final, batch_size=batch_size, shuffle=False),
+        label_node_groups,
+        num_gibbs_steps=10,
+        num_classes=num_classes,
+        nodes_per_label=nodes_per_label, 
+        aggregation=aggregation_method,
+        inference_method=classification_inference_method,
+    )
 
-test_acc, test_per_class = evaluate_classifier(
-    model, test_loader, 
-    label_node_groups, 
-    num_gibbs_steps=10,
-    num_classes=num_classes,
-    nodes_per_label=nodes_per_label,
-    aggregation=aggregation_method 
-)
+    test_acc, test_per_class = evaluate_classifier(
+        model, test_loader, 
+        label_node_groups, 
+        num_gibbs_steps=10,
+        num_classes=num_classes,
+        nodes_per_label=nodes_per_label,
+        aggregation=aggregation_method,
+        inference_method=classification_inference_method,
+    )
 
 #%% 9. Visualize Some Predictions
 
@@ -479,15 +513,16 @@ print("\nVisualizing predictions on test images...")
 sample_batch = next(iter(test_loader))
 sample_pixels, sample_labels = sample_batch[0][:9].to(device), sample_batch[1][:9]
 
-# Use FAST inference
-preds, confs = classify_images_fast(
-    model, sample_pixels, 
-    label_node_groups,
-    num_gibbs_steps=50,
-    num_classes=num_classes,
-    nodes_per_label=nodes_per_label,
-    aggregation=aggregation_method  
-)
+with torch.inference_mode():
+    preds, confs = classify_images_fast(
+        model, sample_pixels, 
+        label_node_groups,
+        num_gibbs_steps=50,
+        num_classes=num_classes,
+        nodes_per_label=nodes_per_label,
+        aggregation=aggregation_method,
+        inference_method=classification_inference_method,
+    )
 
 fig, axes = plt.subplots(3, 3, figsize=(9, 9))
 for i, ax in enumerate(axes.flat):
@@ -517,12 +552,176 @@ for digit, acc in test_per_class.items():
     print(f"  Digit {digit}: {100*acc:.2f}%")
 print(f"{'='*60}\n")
 
+
+def estimate_classifier_with_neal_conditional_sampling(
+    model,
+    pixels,
+    labels,
+    num_pixel_nodes,
+    num_classes,
+    nodes_per_label,
+    num_reads=64,
+    num_sweeps=100,
+    beta_range=(0.1, 3.0),
+    seed=None,
+):
+    """
+    Estimate QA-deployable classification by clamping image pixels and sampling
+    free label + hidden variables with Neal SA, then decoding the sampled labels.
+    """
+    import dimod
+    import neal
+
+    model.eval()
+
+    with torch.no_grad():
+        W_vv, W_hh, W_vh = model._get_masked_weights()
+        W_vv = W_vv.cpu().numpy()
+        W_hh = W_hh.cpu().numpy()
+        W_vh = W_vh.cpu().numpy()
+        b_v = model.b_v.cpu().numpy()
+        b_h = model.b_h.cpu().numpy()
+
+    nv = model.num_visible
+    nh = model.num_hidden
+
+    linear = {}
+    quadratic = {}
+
+    for i in range(nv):
+        linear[i] = -float(b_v[i])
+    for j in range(nh):
+        linear[nv + j] = -float(b_h[j])
+
+    for i in range(nv):
+        for j in range(i + 1, nv):
+            w = float(W_vv[i, j])
+            if w != 0.0:
+                quadratic[(i, j)] = -w
+
+    for i in range(nh):
+        for j in range(i + 1, nh):
+            w = float(W_hh[i, j])
+            if w != 0.0:
+                quadratic[(nv + i, nv + j)] = -w
+
+    for i in range(nv):
+        for j in range(nh):
+            w = float(W_vh[i, j])
+            if w != 0.0:
+                quadratic[(i, nv + j)] = -w
+
+    base_bqm = dimod.BinaryQuadraticModel(linear, quadratic, 0.0, vartype=dimod.BINARY)
+    sampler = neal.SimulatedAnnealingSampler()
+
+    all_preds = []
+    all_labels = []
+    all_confidences = []
+
+    print(f"\n{'='*70}")
+    print("  QA-LIKE CONDITIONAL SAMPLING ESTIMATE (NEAL)")
+    print(f"{'='*70}")
+    print(f"Evaluating {len(labels)} test images with clamped-pixel Neal sampling...")
+
+    for idx in range(len(labels)):
+        pixel_vec = pixels[idx].cpu().numpy().astype(np.int8)
+        bqm = base_bqm.copy()
+        for pixel_idx in range(num_pixel_nodes):
+            bqm.fix_variable(pixel_idx, int(pixel_vec[pixel_idx]))
+
+        kwargs = {
+            'num_reads': num_reads,
+            'num_sweeps': num_sweeps,
+        }
+        if beta_range is not None:
+            kwargs['beta_range'] = list(beta_range)
+        if seed is not None:
+            kwargs['seed'] = seed + idx
+
+        sampleset = sampler.sample(bqm, **kwargs)
+        var_list = list(sampleset.variables)
+
+        label_samples = np.zeros((num_reads, num_classes * nodes_per_label), dtype=np.float32)
+        for class_idx in range(num_classes):
+            for offset in range(nodes_per_label):
+                visible_label_idx = num_pixel_nodes + class_idx * nodes_per_label + offset
+                if visible_label_idx in var_list:
+                    sample_col = var_list.index(visible_label_idx)
+                    label_samples[:, class_idx * nodes_per_label + offset] = sampleset.record.sample[:, sample_col]
+
+        per_class_read_scores = np.stack([
+            label_samples[:, c * nodes_per_label:(c + 1) * nodes_per_label].mean(axis=1)
+            for c in range(num_classes)
+        ], axis=1)
+        winning_reads = np.argmax(per_class_read_scores, axis=1)
+        class_scores = np.array(
+            [np.mean(winning_reads == class_idx) for class_idx in range(num_classes)],
+            dtype=np.float32,
+        )
+
+        pred_class = int(np.argmax(class_scores))
+        confidence = float(class_scores[pred_class])
+        all_preds.append(pred_class)
+        all_labels.append(int(labels[idx].item()))
+        all_confidences.append(confidence)
+
+        if (idx + 1) % max(1, len(labels) // 10) == 0:
+            print(f"  Processed {idx+1}/{len(labels)} QA-like samples...")
+
+    all_preds = np.array(all_preds)
+    all_labels = np.array(all_labels)
+    accuracy = float(np.mean(all_preds == all_labels))
+
+    per_class_acc = {}
+    for class_idx in range(num_classes):
+        class_mask = all_labels == class_idx
+        if class_mask.any():
+            per_class_acc[class_idx] = float(np.mean(all_preds[class_mask] == all_labels[class_mask]))
+        else:
+            per_class_acc[class_idx] = 0.0
+
+    print(f"\n  QA-like Neal Accuracy: {100*accuracy:.2f}%")
+    print(f"  Mean QA-like confidence: {100*np.mean(all_confidences):.2f}%")
+    for class_idx in range(num_classes):
+        print(f"  Class {class_idx} QA-like Accuracy: {100*per_class_acc[class_idx]:.2f}%")
+
+    return {
+        'accuracy': accuracy,
+        'per_class': per_class_acc,
+        'mean_confidence': float(np.mean(all_confidences)),
+        'num_eval_images': int(len(labels)),
+        'num_reads': int(num_reads),
+        'num_sweeps': int(num_sweeps),
+        'beta_range': beta_range,
+    }
+
+
+qa_like_results = None
+if qa_estimate_enabled:
+    qa_eval_count = min(qa_estimate_num_test_images, len(test_data))
+    qa_indices = torch.randperm(len(test_data))[:qa_eval_count]
+    qa_test_pixels = test_data[qa_indices]
+    qa_test_labels = test_labels[qa_indices]
+    qa_like_results = estimate_classifier_with_neal_conditional_sampling(
+        model=model,
+        pixels=qa_test_pixels,
+        labels=qa_test_labels,
+        num_pixel_nodes=num_visible,
+        num_classes=num_classes,
+        nodes_per_label=nodes_per_label,
+        num_reads=qa_estimate_num_reads,
+        num_sweeps=qa_estimate_num_sweeps,
+        beta_range=qa_estimate_beta_range,
+        seed=qa_estimate_seed,
+    )
+
 # Save classification results
 classification_results = {
     'train_accuracy': train_acc,
     'test_accuracy': test_acc,
     'train_per_class': train_per_class,
     'test_per_class': test_per_class,
+    'qa_like_neal_estimate': qa_like_results,
 }
 
 # =============================================================================
@@ -567,7 +766,18 @@ elif architecture == "ilp":
 hyperparams.update({
     'use_classification': use_classification,
     'num_classes': num_classes if use_classification else None,
-    'label_nodes': label_nodes if use_classification else None,
+    'label_nodes': label_node_groups if use_classification else None,
+    'label_assignment_mode': 'native_coverage' if use_classification else None,
+    'label_coverage_mode': label_coverage_mode if use_classification else None,
+    'label_assignment_time_limit': label_assignment_time_limit if use_classification else None,
+    'label_assignment_stats': label_assignment_stats if use_classification else None,
+    'classification_loss_weight': classification_loss_weight if use_classification else None,
+    'classification_inference_method': classification_inference_method if use_classification else None,
+    'qa_estimate_enabled': qa_estimate_enabled if use_classification else None,
+    'qa_estimate_num_test_images': qa_estimate_num_test_images if use_classification else None,
+    'qa_estimate_num_reads': qa_estimate_num_reads if use_classification else None,
+    'qa_estimate_num_sweeps': qa_estimate_num_sweeps if use_classification else None,
+    'qa_estimate_beta_range': qa_estimate_beta_range if use_classification else None,
 })
 
 # Early save (will be overwritten after quality evaluation with full metrics)
@@ -580,6 +790,7 @@ torch.save({
     'graph_edges': list(G_relabeled.edges()),
     'node_labels': node_labels,
     'hparam_tag': hparam_tag,
+    'classification_results': classification_results,
 }, model_path)
 print(f"Saved initial model checkpoint to {model_path}")
 

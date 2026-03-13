@@ -536,15 +536,17 @@ class CustomBoltzmannMachine(nn.Module):
         Uses mean-field for positive phase and sampling for negative phase.
         """
         batch_size = v_data.shape[0]
-        v_pos = v_data.to(device)
+        with torch.no_grad():
+            v_pos = v_data.to(device)
 
-        # --- Positive Phase: Use mean-field approximation ---
-        # Initialize hidden units
-        h_pos = torch.full((batch_size, self.num_hidden), 0.5, device=device)
-        
-        # Run mean-field updates to get approximate posterior
-        for _ in range(self.k_gibbs_positive):
-            v_pos, h_pos = self.mean_field_update(v_pos, h_pos, update_v=False, update_h=True)
+            # --- Positive Phase: Use mean-field approximation ---
+            # The state inference itself does not need autograd; gradients flow
+            # through the energy evaluation using the inferred states.
+            h_pos = torch.full((batch_size, self.num_hidden), 0.5, device=device)
+            
+            # Run mean-field updates to get approximate posterior
+            for _ in range(self.k_gibbs_positive):
+                v_pos, h_pos = self.mean_field_update(v_pos, h_pos, update_v=False, update_h=True)
 
         # --- Negative Phase: Use sampling ---
         # Start from positive phase but detached
@@ -562,7 +564,7 @@ class CustomBoltzmannMachine(nn.Module):
 
         # --- Loss Calculation ---
         pos_energy = self.energy(v_pos.detach(), h_pos.detach()).mean()
-        neg_energy = self.energy(v_neg, h_neg).mean()
+        neg_energy = self.energy(v_neg.detach(), h_neg.detach()).mean()
         cd_loss = pos_energy - neg_energy
 
         return cd_loss, v_neg

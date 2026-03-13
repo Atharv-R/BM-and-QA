@@ -1,0 +1,68 @@
+[
+  {
+    "trial": 1,
+    "timestamp": "2026-03-11T00:22:13.977806",
+    "model_path": "data/cls_hpsearch_20260311_001922_trial001_spectral_val23.25_test24.21.pt",
+    "config": {
+      "architecture": "spectral",
+      "K": 12,
+      "grid_shape": [
+        28,
+        28
+      ],
+      "num_visible_pixels": 784,
+      "binarize_threshold": 0.5,
+      "digit_filter": null,
+      "lr": 2.2910038158089775e-05,
+      "weight_decay": 1.2592654080437008e-07,
+      "batch_size": 32,
+      "epochs": 5,
+      "k_steps": 3,
+      "nodes_per_label": 1,
+      "classification_loss_weight": 2.4307414603769923,
+      "classification_inference_method": "free_energy",
+      "refinement_iters": 500,
+      "vv_penalty": 0.001147081931340235
+    },
+    "arch_stats": {
+      "vh": 10371,
+      "vv": 2287,
+      "hh": 33206,
+      "num_hidden": 4016,
+      "label_hidden_edges": 40160
+    },
+    "best_val_acc": 0.2325387564594099,
+    "best_val_loss": 2.253284457207203,
+    "final_val_acc": 0.2325387564594099,
+    "test_loss": 2.250842889404297,
+    "test_acc": 0.2421,
+    "best_epoch": 5,
+    "stopped_early": false,
+    "total_time_seconds": 171.49857783317566,
+    "val_per_class": {
+      "0": 0.3293918918918919,
+      "1": 0.9985163204747775,
+      "2": 0.7701342281879194,
+      "3": 0.0,
+      "4": 0.0,
+      "5": 0.0,
+      "6": 0.11486486486486487,
+      "7": 0.0,
+      "8": 0.0,
+      "9": 0.0
+    },
+    "test_per_class": {
+      "0": 0.32346938775510203,
+      "1": 0.9973568281938326,
+      "2": 0.7906976744186046,
+      "3": 0.0,
+      "4": 0.0,
+      "5": 0.0,
+      "6": 0.162839248434238,
+      "7": 0.0,
+      "8": 0.0,
+      "9": 0.0
+    },
+    "final_train_total_loss": -133.6258625964406
+  }
+]

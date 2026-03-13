@@ -58,6 +58,8 @@ wheels/
 .installed.cfg
 *.egg
 
+
+
 GPU_OPTIMIZATION_SUMMARY.md
 gurobi.lic
 .gitignore
@@ -73,3 +75,4 @@ agent_memory.txt
 data/hpsearch*
 
 *.png
+*.pt

@@ -779,6 +779,9 @@ configurations. It handles architecture selection, training, evaluation, and
 result tracking automatically. The leaderboard JSON is updated after every
 trial, so results are safe even if the process is interrupted.
 
+
+The venv to use is in ~/code/venv/bin/python, which has all 
+necessary packages.
 ================================================================================
 END OF SUMMARY
 ================================================================================
