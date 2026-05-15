@@ -668,7 +668,10 @@ def estimate_classifier_with_neal_conditional_sampling(
             bqm.fix_variable(pixel_idx, int(pixel_vec[pixel_idx]))
         
         # Sample
-        sampleset = sampler.sample(bqm, **kwargs)
+        sampleset = sampler.sample(
+            bqm, num_reads=num_reads, num_sweeps=num_sweeps,
+            beta_range=beta_range, seed=seed,
+        )
         var_list = list(sampleset.variables)
         
         # Extract label samples (now just num_classes nodes, not num_classes * nodes_per_label)

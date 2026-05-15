@@ -1,0 +1,41 @@
+seed_and_connect strategy — open issues (April 2026)
+=====================================================
+
+Problem: Some classes get stuck at 1-2 nodes because their seed lands on a
+hidden node whose hidden-subgraph neighbors all get claimed by earlier classes.
+The frontier dries up and the chain can't grow.
+
+Root cause: The greedy seed selection picks the globally best 2-hop-coverage
+node, but doesn't account for whether that node has enough hidden neighbors
+to sustain growth. With 10 classes competing for frontier nodes round-robin,
+early classes can wall off later seeds.
+
+What we tried:
+1. Original: multi-seed placement + Steiner tree connection.
+   Failed because seeds spread across disconnected regions of the hidden
+   subgraph; Steiner trees consumed hundreds of connector nodes or couldn't
+   find paths at all (Mehlhorn KeyError, then node-disjointness starvation).
+
+2. Single-seed + connected growth with 2-hop pixel coverage metric.
+   Fixed connectivity (chains always connected by construction) but some
+   classes still get stuck at 1-2 nodes when their seed's frontier is
+   entirely consumed by other classes.
+
+3. Restricting to giant connected component of hidden subgraph.
+   Didn't help — the hidden subgraph is already one giant component (4016
+   nodes, all connected). The issue is local frontier exhaustion, not
+   global disconnection.
+
+4. Counting 2-hop coverage only through hidden intermediaries (h→hidden→pixel).
+   Improved seed placement (seeds now have hidden neighbors) but still 2
+   classes stuck at 2 nodes.
+
+Ideas not yet tried:
+- Add a tie-breaking / penalty term for hidden-degree (ensure seeds have
+  ample room to grow, not just high coverage).
+- Reserve frontier capacity: before seeding, estimate how many growth steps
+  each seed can sustain and penalize low-capacity seeds.
+- Backtracking: if a class gets stuck, steal a neighbor from a larger chain
+  or re-seed entirely.
+- Two-phase: first run connected_greedy to guarantee full chains, then
+  measure 2-hop coverage as a quality metric for comparison.
