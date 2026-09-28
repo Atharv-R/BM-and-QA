@@ -101,7 +101,7 @@ architecture = "tiling"
 # Z(6) = 1248 nodes; Z(7) = 1680; Z(8) = 2176
 # For 28x28 MNIST (784 visible), need K >= 5 (Z(5)=880, only 96 hidden)
 # K=6 recommended: 1248 nodes → 784 visible + 464 hidden
-K = 6
+K = 12
 
 # ---- Image configuration ----
 grid_shape = (28, 28)  # Full MNIST
@@ -144,7 +144,7 @@ print(f"Label assignment: native nodes, coverage_mode={label_coverage_mode}, "
 lr = 5e-3
 weight_decay = 0.00001  # L2 regularization (Adam weight_decay)
 batch_size = 64
-epochs = 20 
+epochs = 5 
 k_steps = 5
 persistent_chains = True
 eval_every = 3
@@ -324,6 +324,22 @@ test_dataset_final = TensorDataset(test_data, test_labels)
 
 
 loader = DataLoader(train_dataset_final, batch_size=batch_size, shuffle=True, drop_last=True)
+
+# Split test set into val (for monitoring) and held-out test
+val_size = min(2000, len(test_data))  # use up to 2000 stratified samples
+val_indices = []
+samples_per_class = val_size // num_classes
+for c in range(num_classes):
+    class_idx = (test_labels == c).nonzero(as_tuple=True)[0]
+    chosen = class_idx[:samples_per_class]
+    val_indices.append(chosen)
+val_indices = torch.cat(val_indices)
+
+val_data = test_data[val_indices]
+val_labels_tensor = test_labels[val_indices]
+val_dataset = TensorDataset(val_data, val_labels_tensor)
+val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+
 test_loader = DataLoader(test_dataset_final, batch_size=batch_size, shuffle=False)
 
 
@@ -462,23 +478,44 @@ print(f"    Labels: {num_classes} (fused from {num_classes * nodes_per_label} or
 print(f"    Hidden: {num_hidden}")
 print(f"    Total visible (pixels + labels): {num_visible_total}")
 
-
-# ANALYZE NODE FUSION RESULTS
+# After fusion
 print(f"\n{'='*70}")
-print("  FUSED LABEL NODE ANALYSIS")
+print("  NODE COUNT VERIFICATION")
 print(f"{'='*70}")
-for class_idx, super_node_id in enumerate(range(num_visible, num_visible + num_classes)):
-    degree = G_relabeled.degree(super_node_id)
-    pixel_connections = sum(1 for n in G_relabeled.neighbors(super_node_id) 
-                           if n < num_visible)
-    hidden_connections = sum(1 for n in G_relabeled.neighbors(super_node_id) 
-                            if n >= num_visible + num_classes)
-    
-    print(f"  Class {class_idx} (node {super_node_id}):")
-    print(f"    Total degree: {degree}")
-    print(f"    Pixel connections: {pixel_connections}")
-    print(f"    Hidden connections: {hidden_connections}")
+print(f"  Original Zephyr nodes (K={K}): {n_zephyr}")
+print(f"  After pixel assignment: {G_relabeled.number_of_nodes()}")
+print(f"  After fusion: {G_fused.number_of_nodes()}")
+print(f"  After relabeling: {G_relabeled.number_of_nodes()}")
+print(f"\n  Expected after fusion: {n_zephyr - (num_classes * (nodes_per_label - 1))}")
+print(f"    (Original {n_zephyr} - {num_classes * (nodes_per_label - 1)} nodes removed by fusion)")
+
+if G_relabeled.number_of_nodes() > n_zephyr:
+    print("  ❌ ERROR: More nodes than original Zephyr graph!")
+    print("     This means nodes were ADDED, not NATIVE to hardware!")
+elif G_relabeled.number_of_nodes() < n_zephyr:
+    print(f"  ✅ CORRECT: Fewer nodes than original ({n_zephyr - G_relabeled.number_of_nodes()} removed by fusion)")
+    print("     All nodes are NATIVE to Zephyr hardware")
+else:
+    print("  ⚠️ WARNING: Same node count - no fusion occurred?")
 print(f"{'='*70}\n")
+
+
+# # ANALYZE NODE FUSION RESULTS
+# print(f"\n{'='*70}")
+# print("  FUSED LABEL NODE ANALYSIS")
+# print(f"{'='*70}")
+# for class_idx, super_node_id in enumerate(range(num_visible, num_visible + num_classes)):
+#     degree = G_relabeled.degree(super_node_id)
+#     pixel_connections = sum(1 for n in G_relabeled.neighbors(super_node_id) 
+#                            if n < num_visible)
+#     hidden_connections = sum(1 for n in G_relabeled.neighbors(super_node_id) 
+#                             if n >= num_visible + num_classes)
+    
+#     print(f"  Class {class_idx} (node {super_node_id}):")
+#     print(f"    Total degree: {degree}")
+#     print(f"    Pixel connections: {pixel_connections}")
+#     print(f"    Hidden connections: {hidden_connections}")
+# print(f"{'='*70}\n")
 
 # =============================================================================
 # 5. Model Initialization
@@ -505,8 +542,9 @@ training_history = train_classifier_bm(
     label_node_groups=label_node_groups,
     batch_size=batch_size, step_size=lr, 
     num_classes=num_classes,
-    nodes_per_label=1,
+    nodes_per_label=nodes_per_label,
     classification_loss_weight=classification_loss_weight,
+    val_loader=val_loader
 )
 
 # =============================================================================

@@ -524,7 +524,7 @@ def compute_class_scores_free_energy(model, pixels, label_node_groups, num_class
 
 def train_classifier_bm(model, data_loader, optimizer, num_epochs, k_steps, 
                         label_node_groups, batch_size, step_size, num_classes=10, nodes_per_label=1,
-                        classification_loss_weight=1.0):
+                        classification_loss_weight=1.0, val_loader=None):
     """
     Train discriminative BM where labels are part of the visible layer.
     Now supports multiple nodes per label.
@@ -538,7 +538,9 @@ def train_classifier_bm(model, data_loader, optimizer, num_epochs, k_steps,
     train_recon_mse_history = []  
     train_recon_acc_history = []
     train_recon_bce_history = []
-    
+    val_acc_history = []
+    val_per_class_history = []
+
     print(f"\nTraining Classifier BM (epochs={num_epochs}, k_steps={k_steps}, "
           f"num_classes={num_classes}, nodes_per_label={nodes_per_label})...")
     
@@ -597,17 +599,35 @@ def train_classifier_bm(model, data_loader, optimizer, num_epochs, k_steps,
             train_recon_mse_history.append(train_metrics['mse'])
             train_recon_acc_history.append(train_metrics['accuracy'])
             train_recon_bce_history.append(train_metrics['bce'])
-        
+
+            # --- Validation Accuracy ---
+            if val_loader is not None:
+                val_acc, val_per_class = evaluate_classifier(
+                    model, val_loader,
+                    label_node_groups=label_node_groups,
+                    num_gibbs_steps=10,
+                    num_classes=num_classes,
+                    nodes_per_label=nodes_per_label,
+                    aggregation='average',
+                    inference_method='free_energy',
+                )
+                val_acc_history.append(val_acc)
+                val_per_class_history.append(val_per_class)
+            else:
+                val_acc = None
+        val_str = f" | Val Acc: {100*val_acc:.2f}%" if val_acc is not None else ""
         print(f"Epoch {epoch+1}/{num_epochs} | CD: {avg_loss:.4f} | Cls: {avg_cls_loss:.4f} | "
               f"Total: {avg_total_loss:.4f} | PLL: {pll:.4f} | "
               f"Recon MSE: {train_recon_mse_history[-1]:.4f} | Recon Acc: {train_recon_acc_history[-1]:.4f} | "
-              f"Recon BCE: {train_recon_bce_history[-1]:.4f}")
+              f"Recon BCE: {train_recon_bce_history[-1]:.4f}{val_str}")
     
     return {
         'pcd_loss': loss_history,
         'classification_loss': classification_loss_history,
         'total_loss': total_loss_history,
         'pll': pll_values,
+        'val_accuracy': val_acc_history,
+        'val_per_class': val_per_class_history,
     }
 
 

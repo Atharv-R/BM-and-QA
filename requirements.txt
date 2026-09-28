@@ -1,0 +1,28 @@
+# Deep learning
+torch==2.11.0
+torchvision==0.20.1
+
+# Scientific computing
+numpy==1.26.4
+scipy==1.13.1
+scikit-image==0.24.0
+pandas==2.2.2
+
+# Visualization
+matplotlib==3.9.2
+
+# Graph algorithms
+networkx==3.3
+gcol==2.2
+
+# D-Wave / Quantum Annealing stack
+dwave-networkx==0.8.18
+dimod==0.12.21
+minorminer==0.2.21
+dwave-samplers
+dwave-system
+neal
+
+# ILP solvers (used in ARCH3 and QA chain selection)
+pyomo==6.10.0
+pyscipopt==6.2.0
